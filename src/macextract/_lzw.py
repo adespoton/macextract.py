@@ -6,9 +6,9 @@ eight-code group in force. The width widens by one at each power of two
 the table reaches. A code may name the entry it is itself about to
 define.
 
-Used by AppleLink packages (13 bits, block mode), MacBinary-adjacent
-.Z files, ARC methods 8/9 and DiskDoubler method 1. Written from the
-published algorithm and the format notes; no code was copied.
+Used by AppleLink packages (13 bits, block mode), .Z files (parameters
+from the .Z header), ARC methods 8/9 and DiskDoubler method 1. Written
+from the published algorithm and the format notes; no code was copied.
 """
 
 from .errors import CorruptError
@@ -35,18 +35,7 @@ class LsbBitReader:
         return value
 
 
-def lzw_decompress(data, out_len, maxbits=13, blockmode=True, offset=0,
-                   limit=None):
-    """Decode exactly ``out_len`` bytes; returns them. Raises
-    CorruptError on truncation or a code that names no defined entry.
-    """
-    if out_len < 0:
-        raise CorruptError("LZW: output length must not be negative")
-    if out_len == 0:
-        return b""
-    if maxbits < 9 or maxbits > 16:
-        raise CorruptError("LZW: maxbits must be between 9 and 16")
-
+def _decode(reader, out, out_len, maxbits, blockmode):
     maxsymbols = 1 << maxbits
     clear = 256
     bump = 1 if blockmode else 0
@@ -58,9 +47,6 @@ def lzw_decompress(data, out_len, maxbits=13, blockmode=True, offset=0,
     chr_ = list(range(256)) + [0] * (maxsymbols - 256)
     len_ = [1] * 256 + [0] * (maxsymbols - 256)
 
-    reader = LsbBitReader(data, offset, limit)
-    out = bytearray()
-
     def string_of(sym):
         parts = bytearray()
         node = sym
@@ -69,10 +55,12 @@ def lzw_decompress(data, out_len, maxbits=13, blockmode=True, offset=0,
             node = parent[node]
         return parts[::-1]
 
-    while len(out) < out_len:
+    while True:
+        if len(out) >= out_len:
+            break
         code = reader.read_code(symbolsize)
         if code is None:
-            raise CorruptError("LZW: bit stream exhausted")
+            break
         symbolcounter += 1
         if blockmode and code == clear:
             remainder = symbolcounter % 8
@@ -107,4 +95,38 @@ def lzw_decompress(data, out_len, maxbits=13, blockmode=True, offset=0,
             if numsymbols < maxsymbols and (numsymbols & (numsymbols - 1)) == 0:
                 symbolsize += 1
         prevsymbol = code
+    if len(out) > out_len:
+        raise CorruptError("LZW: output exceeds its cap")
     return bytes(out[:out_len])
+
+
+def lzw_decompress(data, out_len, maxbits=13, blockmode=True, offset=0,
+                   limit=None):
+    """Decode exactly ``out_len`` bytes; returns them. Raises
+    CorruptError on truncation or a code that names no defined entry.
+    """
+    if out_len < 0:
+        raise CorruptError("LZW: output length must not be negative")
+    if out_len == 0:
+        return b""
+    if maxbits < 9 or maxbits > 16:
+        raise CorruptError("LZW: maxbits must be between 9 and 16")
+
+    out = bytearray()
+    reader = LsbBitReader(data, offset, limit)
+    decoded = _decode(reader, out, out_len, maxbits, blockmode)
+    if len(decoded) != out_len:
+        raise CorruptError("LZW: bit stream exhausted")
+    return decoded
+
+
+def lzw_decompress_all(data, maxbits=16, blockmode=True, offset=0,
+                       limit=None, out_cap=512 * 1024 * 1024):
+    """Decode until the stream ends; returns all bytes. EOF terminates
+    cleanly (the format stores no size); ``out_cap`` guards a runaway.
+    """
+    if maxbits < 9 or maxbits > 16:
+        raise CorruptError("LZW: maxbits must be between 9 and 16")
+    out = bytearray()
+    reader = LsbBitReader(data, offset, limit)
+    return _decode(reader, out, out_cap, maxbits, blockmode)

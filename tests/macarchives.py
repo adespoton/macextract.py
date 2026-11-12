@@ -2532,3 +2532,91 @@ def now_archive(entries, trailer=True, created=0xC9C00000,
         struct.pack_into(">I", tail, 12, _sum32(tail[:12]))
         out += tail
     return bytes(out)
+
+
+def compress_encode(payload, maxbits=16, blockmode=True, force_clear=False):
+    """Unix compress(1) writer: ``1f 9d`` header and flags byte (low 5
+    bits the max code width, 0x80 the block bit), then LSB-first LZW
+    codes starting at 9 bits.  The code width widens exactly as the
+    decoder widens: after the decoder's table reaches a power of two,
+    and not one bit earlier — the encoder's own table runs one entry
+    ahead, so the schedule is counted against the decoder's view, not
+    this one's.  A full table stops inserting (saturation), which is
+    how the real encoder behaves on modest inputs: the block-mode
+    clear 256 is a ratio-triggered escape, not a hard cap, and no
+    corpus available here shows one even at 717 KB.
+    ``force_clear=True`` emits clear 256 at the table boundary,
+    producing streams no real decompressor accepts (checked against
+    ncompress, gzip and busybox at maxbits 9); it exists only to
+    grade this decoder's clear path for self-consistency.  Needed to
+    grade the .Z reader end to end."""
+    bits = []
+
+    def put(value, nbits):
+        for i in range(nbits):
+            bits.append((value >> i) & 1)
+
+    clear = 256
+    full = 1 << maxbits
+    next_code = clear + 1 if blockmode else 256
+    symbolsize = 9
+    dec_ns = clear + 1 if blockmode else 256   # width the DECODER is in
+    first_code = True
+    group = 0                                   # codes in the current 8-code group
+
+    def fresh():
+        return {bytes([i]): i for i in range(256)}
+
+    def pad_group():
+        nonlocal group
+        if group:
+            for _ in range((8 - group) * symbolsize):
+                bits.append(0)
+        group = 0
+
+    def emit(code):
+        nonlocal symbolsize, dec_ns, first_code, group
+        put(code, symbolsize)
+        group = (group + 1) % 8
+        if not first_code and dec_ns < full:
+            dec_ns += 1
+            if dec_ns & (dec_ns - 1) == 0 and symbolsize < maxbits:
+                symbolsize += 1
+        first_code = False
+
+    table = fresh()
+    current = b""
+    for byte in payload:
+        current += bytes([byte])
+        if current in table:
+            continue
+        emit(table[current[:-1]])
+        if next_code < full:
+            table[current] = next_code
+            next_code += 1
+        elif blockmode and force_clear:
+            # The decoder discards the remainder of the 8-code group
+            # once it reads clear, so the encoder pads this group to
+            # its boundary too.
+            emit(clear)
+            pad_group()
+            dec_ns = clear + 1
+            symbolsize = 9
+            first_code = True
+            next_code = clear + 1
+            table = fresh()
+        # full table without force_clear: keep coding with what exists
+        current = current[-1:]
+    if current:
+        emit(table[current])
+    out = bytearray(3)
+    out[0] = 0x1F
+    out[1] = 0x9D
+    out[2] = (maxbits & 0x1F) | (0x80 if blockmode else 0)
+    body = bytearray()
+    for i in range(0, len(bits), 8):
+        value = 0
+        for j, bit in enumerate(bits[i:i + 8]):
+            value |= bit << j
+        body.append(value)
+    return bytes(out + body)

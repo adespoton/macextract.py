@@ -139,8 +139,19 @@ begins.
     boundary with `endbits = (16 - pad) & 15`, exactly as the
     format's own writer does it. 26 tests, generated fixtures only.
 
-Later batches (each with tests): MacCompress (.Z) → ARC → LZH/LHA →
-PackIt splits → DiskDoubler/StuffIt split volumes → MAR → Apple
-Backup → Tomes → zip/gzip/tar → StuffIt SpaceSaver (with Aladdin
-tables, attribution per NOTICE). StuffIt X never. PC formats (RAR, 7z,
-bzip2, xz) never.
+15. [x] Unix compress (.Z) — the three-byte `1f 9d` header with the
+    flags byte (low 5 bits max code width 9..16, 0x80 the block bit),
+    LSB-first LZW with clear 256, the 8-code group and the width
+    widening exactly as the decoder widens. The reader decodes to
+    EOF with a 1 GiB output ceiling; the entry is named from the
+    filename hint with a trailing .Z stripped. The fixture writer
+    saturates a full table instead of forcing clears, matching every
+    real -b9/-b12/-b16 specimen at hand (zero clears in 717 KB of
+    high-entropy input); 9-bit .Z files are unportable (ncompress,
+    gzip and busybox all refuse them), 10-bit and up decode
+    byte-exact through all three. 40 tests.
+
+Later batches (each with tests): ARC → LZH/LHA → PackIt splits →
+DiskDoubler/StuffIt split volumes → MAR → Apple Backup → Tomes →
+zip/gzip/tar → StuffIt SpaceSaver (with Aladdin tables, attribution
+per NOTICE). StuffIt X never. PC formats (RAR, 7z, bzip2, xz) never.

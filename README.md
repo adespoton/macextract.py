@@ -49,13 +49,14 @@ listed under *Supported* is not supported yet. See
 | Compact Pro | `.cpt` | folders rebuilt from the directory-count scheme, comments, RLE and LZH (LZSS + canonical Huffman) forks; encrypted archives via `password=` (its CRC-table cipher); segmented sets refused by name |
 | DiskDoubler | `.dd`, `.ddar`, `.dda2` | single-file (84-byte header and the 1990 48-byte variant), DDAR and DDA2 containers, folders rebuilt from the path records, all ten methods (stored, LZW, RLE-90, Huffman, splay-tree, AD, STAC, Compact Pro's LZH/RLE round, DDn with its canonical Huffman codes), the delta form (distance 1 only; other distances refused by name), the 0x5a header garble honoured for methods 1/2/5, Finder info carried; DDAR closing records and markerless DDA2 endings tolerated |
 | Now Compress | `.sea`/bare | archives and bare compressed files; the 24-byte `00 02` header, 110-byte records, folder levels closed by the count at +82; forks decoded by block (stored, LZSS, Huffman, Huffman+LZSS, the shape-3 coder) with the archive-wide dictionary cache; Finder info carried |
+| Unix compress | `.Z` | LZW with the `1f 9d` magic and the flags byte (max code width, block bit); decoded to EOF, entry named from the filename (trailing `.Z` stripped); byte-exact against `compress -d`, `gzip -dc` and `busybox uncompress` for maxbits 10–16 fixtures |
 
 ## Not supported (yet)
 
 StuffIt X, StuffIt classic's methods 5/6/7/8/14, StuffIt 5's
 method 14 (code-only, no spec), MacCompress,
 StuffIt SpaceSaver, Alysis SuperDisk!, Private File, ARC, LZH/LHA, MAR, Apple
-Backup, Tomes, zip/gzip/tar/.Z, RAR, 7-Zip, bzip2, xz, and PC formats.
+Backup, Tomes, zip/gzip/tar, RAR, 7-Zip, bzip2, xz, and PC formats.
 StuffIt X and every other PC/modern format are out of scope, same as
 the C project.
 
