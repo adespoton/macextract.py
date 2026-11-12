@@ -119,8 +119,28 @@ begins.
     for method 1.  Finder info carried for single-file images and DDAR
     records.  60 tests, generated data only.
 
-Later batches (each with tests): Now Compress →
-MacCompress (.Z) → ARC → LZH/LHA → PackIt splits → DiskDoubler/StuffIt
-split volumes → MAR → Apple Backup → Tomes → zip/gzip/tar → StuffIt
-SpaceSaver (with Aladdin tables, attribution per NOTICE). StuffIt X never. PC formats (RAR, 7z,
+14. [x] Now Compress — archives and bare compressed files from
+    published description plus the C project's measurements. The
+    24-byte `00 02` header, 110-byte entry records (name ≤ 31,
+    u16 flags at +36 with 0x10 = directory, FInfo at +38, the C
+    reference reads the same), folder levels closed by the child
+    count at +82 (a level opened by a folder is pushed after the
+    entry is recorded and closed only once the count runs out —
+    measured, matching `fmt_now.c` line for line), member data areas
+    with the block table (a u32 locating the blocks, 8-byte records
+    of mode/padding/end, a trailing u32 folded into the table's
+    checksum) and blocks in shape 0 (stored), 1 (LZSS, MSB-first
+    flags, `0` = match), 2+0x20 (Huffman only), 0x21 (Huffman then
+    LZSS) and 0x40 (the shape-3 coder with the two canonical
+    Huffman codes and the shared 32 KiB dictionary across a stream's
+    blocks). Finder info carried for files and folders; the bare
+    compressed-file vs archive distinction is the 16-byte trailer
+    (present for archives). Bit-coded regions flush to a 16-bit
+    boundary with `endbits = (16 - pad) & 15`, exactly as the
+    format's own writer does it. 26 tests, generated fixtures only.
+
+Later batches (each with tests): MacCompress (.Z) → ARC → LZH/LHA →
+PackIt splits → DiskDoubler/StuffIt split volumes → MAR → Apple
+Backup → Tomes → zip/gzip/tar → StuffIt SpaceSaver (with Aladdin
+tables, attribution per NOTICE). StuffIt X never. PC formats (RAR, 7z,
 bzip2, xz) never.

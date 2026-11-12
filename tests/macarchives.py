@@ -2053,3 +2053,482 @@ def dda2(entries, trailer=True, created=0xC9C00000,
     if junk_end:
         out += b"\0" * junk_end
     return bytes(out)
+
+
+# ------------------------------------------------------------------ #
+# Now Compress                                                        #
+# ------------------------------------------------------------------ #
+
+def _canon_codes_from_lengths(lengths):
+    """Symbol -> (code, length) for canonical MSB-first codes whose
+    lengths are ``lengths`` (0 = unused).  Same arithmetic as the
+    reader's table build."""
+    count = [0] * 33
+    maxlen = 0
+    for value in lengths:
+        count[value] += 1
+        if value > maxlen:
+            maxlen = value
+    first = [0] * 33
+    code = 0
+    left = 1
+    for length in range(1, maxlen + 1):
+        first[length] = code
+        code = (code + count[length]) << 1
+        left <<= 1
+        left -= count[length]
+        if left < 0:
+            raise ValueError("code lengths over-subscribe")
+    codes = [None] * len(lengths)
+    running = [0] * 33
+    for symbol, value in enumerate(lengths):
+        if value:
+            codes[symbol] = (first[value] + running[value], value)
+            running[value] += 1
+    return codes
+
+
+def _huffman_lengths(freq, count, label):
+    """Code lengths for the symbols in ``freq`` (value -> count), or
+    all zeros where unused.  Deepest code may not pass 15 — the
+    format's 4-bit tables cannot hold more."""
+    if not freq:
+        raise ValueError("%s: no symbols to code" % label)
+    symbols = sorted(freq)
+    if len(symbols) == 1:
+        lengths = [0] * count
+        lengths[symbols[0]] = 1
+        return lengths
+    heap = [(weight, index, ("leaf", symbol))
+            for index, (symbol, weight) in enumerate(sorted(freq.items()))]
+    heapq.heapify(heap)
+    counter = len(heap)
+    while len(heap) > 1:
+        w_a, _, a = heapq.heappop(heap)
+        w_b, _, b = heapq.heappop(heap)
+        heapq.heappush(heap, (w_a + w_b, counter, ("node", a, b)))
+        counter += 1
+    lengths = [0] * count
+
+    def walk(node, depth):
+        if depth > 15:
+            raise ValueError("%s: code deeper than 15 bits" % label)
+        if node[0] == "leaf":
+            lengths[node[1]] = max(depth, 1)
+            return
+        walk(node[1], depth + 1)
+        walk(node[2], depth + 1)
+
+    walk(heap[0][2], 0)
+    return lengths
+
+
+def _huffman_region_encode(payload, nsyms):
+    """One Huffman-coded region in Now Compress's framing: flush byte,
+    ``nsyms`` 4-bit lengths (high nibble first), a count of
+    extra-length entries (always 0 here), a pad to an even offset
+    from the region's start, then the symbols, 16-bit aligned."""
+    freq = Counter(payload)
+    lengths = _huffman_lengths(freq, nsyms, "region")
+    codes = _canon_codes_from_lengths(lengths)
+    body = bytearray()
+    table = bytearray()
+    for i in range(nsyms // 2):
+        table.append((lengths[2 * i] << 4) | lengths[2 * i + 1])
+    if nsyms & 1:
+        table.append(lengths[nsyms - 1] << 4)
+    numbits = 0
+    for symbol, weight in freq.items():
+        numbits += codes[symbol][1] * weight
+    # The flush byte is how much of the last 16-bit word was real,
+    # (16 - pad) & 15; the decoder derives the payload length from the
+    # region's length less (16 - flush) mod 16.
+    flush = (-numbits) % 16
+    if flush:
+        flush = 16 - flush
+    body.append(flush)
+    body += table
+    body.append(0)                      # no extra-length entries
+    if len(body) & 1:
+        body.append(0)                  # the stream starts on an even byte
+    w = MsbBitWriter()
+    for byte in payload:
+        code, length = codes[byte]
+        w.bits(code, length)
+    pad = (-numbits) % 16
+    if pad:
+        w.bits(0, pad)
+    body += w.to_bytes()
+    return bytes(body)
+
+
+def _now_lzss_stream(payload):
+    """The shape-1 stream: the 00 03 prefix, then MSB-first flag
+    bytes of eight tokens each (1 = literal, 0 = match).  A match is
+    two bytes — a 3-bit length (plus 2) in the low bits of the first,
+    a 13-bit distance split across it — unless the length field is 0,
+    which escapes to a third byte carrying length - 2."""
+    out = bytearray(b"\0\x03")
+    tokens = []
+    i = 0
+    n = len(payload)
+    while i < n:
+        best_len, best_dist = 0, 0
+        max_back = min(i, 8191)
+        limit = n - i
+        for dist in range(1, max_back + 1):
+            length = 0
+            while length < min(limit, 257) and payload[i + length - dist] == payload[i + length]:
+                length += 1
+            if length > best_len:
+                best_len, best_dist = length, dist
+                if best_len >= min(limit, 257):
+                    break
+        if best_len >= 3:
+            tokens.append(("m", best_dist, best_len))
+            i += best_len
+        else:
+            tokens.append(("l", payload[i]))
+            i += 1
+    idx = 0
+    while idx < len(tokens):
+        group = tokens[idx:idx + 8]
+        flag = 0
+        for token in group:
+            flag = (flag << 1) | (1 if token[0] == "l" else 0)
+        flag <<= 8 - len(group)         # unused flag bits read as zero
+        out.append(flag)
+        for token in group:
+            if token[0] == "l":
+                out.append(token[1])
+            else:
+                _, dist, length = token
+                b0 = (dist >> 8) << 3
+                if length <= 9:
+                    b0 |= (length - 2) & 0x07
+                    out += bytes([b0, dist & 0xFF])
+                else:
+                    out += bytes([b0, dist & 0xFF, length - 2])
+        idx += 8
+    return bytes(out)
+
+
+def _shape3_len_class(length):
+    from macextract.formats.now import NOW_LEN_BASE, NOW_LEN_EXTRA
+    for sel in range(1, 0x22):
+        lo = NOW_LEN_BASE[sel] + 2
+        hi = lo + (1 << NOW_LEN_EXTRA[sel]) - 1
+        if lo <= length <= hi:
+            return sel
+    raise ValueError("shape-3: no length class for %d" % length)
+
+
+def _shape3_off_class(dist):
+    from macextract.formats.now import NOW_OFF_BASE, NOW_OFF_EXTRA
+    for sel in range(1, 0x38):
+        lo = NOW_OFF_BASE[sel]
+        hi = lo + (1 << NOW_OFF_EXTRA[sel]) - 1
+        if lo <= dist <= hi:
+            return sel
+    raise ValueError("shape-3: no distance class for %d" % dist)
+
+
+class NowEncoderState:
+    """The encoder's view of the archive-wide window: a 32 KiB
+    cache that each stream restarts from, built up as blocks decode."""
+
+    def __init__(self):
+        self.dict_cache = bytearray(32768)
+        self.window = bytearray(32768)
+        self.index = {}
+
+
+def _shape3_block(chunk, state, is_first):
+    """Encode one fork block with the archive coder.  Mutates
+    ``state.window``/``state.index``; the caller updates
+    ``state.dict_cache`` when this is the stream's first block."""
+    from macextract.formats.now import (
+        NOW_LEN_BASE, NOW_LEN_EXTRA, NOW_OFF_BASE, NOW_OFF_EXTRA)
+
+    if is_first:
+        state.window = bytearray(state.dict_cache)
+        state.index = {}
+        for pos in range(max(0, len(state.window) - 3)):
+            state.index.setdefault(bytes(state.window[pos:pos + 3]),
+                                   []).append(pos)
+
+    window = state.window
+    tokens = []
+    i = 0
+    n = len(chunk)
+    while i < n:
+        best_len, best_dist = 0, 0
+        if i + 3 <= n:
+            key = bytes(chunk[i:i + 3])
+            candidates = state.index.get(key)
+            limit = min(n - i, 257)
+            if candidates:
+                for pos in reversed(candidates[-64:]):
+                    dist = len(window) - pos
+                    if dist > 32768:
+                        break
+                    length = 0
+                    while (length < limit and pos + length < len(window)
+                           and window[pos + length] == chunk[i + length]):
+                        length += 1
+                    if length > best_len:
+                        best_len, best_dist = length, dist
+                        if length >= limit:
+                            break
+        if best_len >= 3:
+            tokens.append(("m", best_dist, best_len))
+            for k in range(best_len):
+                window.append(chunk[i + k])
+                key = bytes(window[-3:])
+                state.index.setdefault(key, []).append(len(window) - 3)
+            i += best_len
+        else:
+            tokens.append(("l", chunk[i]))
+            window.append(chunk[i])
+            key = bytes(window[-3:])
+            state.index.setdefault(key, []).append(len(window) - 3)
+            i += 1
+
+    # Token bits, and the two code tables they need
+    main_freq = Counter()
+    off_freq = Counter()
+    for token in tokens:
+        if token[0] == "l":
+            main_freq[token[1]] += 1
+        else:
+            _, dist, length = token
+            main_freq[0x100 + _shape3_len_class(length)] += 1
+            off_freq[_shape3_off_class(dist)] += 1
+
+    main_lengths = _huffman_lengths(main_freq, 290, "main table")
+    if not off_freq:
+        off_freq = {0: 1}
+    off_lengths = _huffman_lengths(off_freq, 56, "distance table")
+    stored = [(value + 2) if value else 0 for value in off_lengths]
+    tables_bytes = bytes(main_lengths) + bytes(stored)
+    inner = _huffman_region_encode(tables_bytes, 20)
+    headersize = len(inner)
+
+    main_codes = _canon_codes_from_lengths(main_lengths)
+    off_codes = _canon_codes_from_lengths(off_lengths)
+
+    numbits = 0
+    parts = []
+    for token in tokens:
+        if token[0] == "l":
+            code, length = main_codes[token[1]]
+            parts.append((code, length, 0, 0, None, None, None))
+            numbits += length
+            continue
+        _, dist, length = token
+        sel = _shape3_len_class(length)
+        osel = _shape3_off_class(dist)
+        code, length_bits = main_codes[0x100 + sel]
+        extra = NOW_LEN_EXTRA[sel]
+        eb = length - NOW_LEN_BASE[sel] - 2
+        ocode, oextra = off_codes[osel]
+        off_eb = dist - NOW_OFF_BASE[osel]
+        parts.append((code, length_bits, extra, eb, ocode, oextra,
+                      (off_eb, NOW_OFF_EXTRA[osel])))
+        numbits += (length_bits + extra + oextra + NOW_OFF_EXTRA[osel]
+                    if oextra else length_bits + extra + oextra)
+    byte3 = (-numbits) % 16
+    if byte3:
+        byte3 = 16 - byte3
+
+    header = bytearray()
+    header += struct.pack(">H", 0x2F59 + headersize)
+    header.append(0)                      # byte 2: unread by anything
+    header.append(byte3)
+    header += inner
+    w = MsbBitWriter()
+    for code, length_bits, extra, eb, ocode, oextra, off_part in parts:
+        w.bits(code, length_bits)
+        if extra:
+            w.bits(eb, extra)
+        if ocode is not None:
+            w.bits(ocode, oextra)
+            if off_part is not None:
+                w.bits(off_part[0], off_part[1])
+    pad = (-numbits) % 16
+    if pad:
+        w.bits(0, pad)
+    header += w.to_bytes()
+    return bytes(header)
+
+
+def _sum32(data):
+    return sum(data) & 0xFFFFFFFF
+
+
+def _now_member_blocks(payload, method, state):
+    """Encode one member's fork bytes (rsrc + data, rsrc first) into
+    (mode, block_bytes) pairs.  ``method``: 0 stored, 1 LZSS (shape
+    1), 0x20 Huffman only, 0x21 Huffman then LZSS, 0x40 shape 3."""
+    if method == 0:
+        return [(0, payload)] if payload else []
+    if method == 1:
+        return [(1, _now_lzss_stream(payload))]
+    if method == 0x20:
+        return [(0x20, _huffman_region_encode(payload[i:i + 0x8000], 0x100))
+                for i in range(0, len(payload), 0x8000)]
+    if method == 0x21:
+        return [(0x21, _huffman_region_encode(
+                    _now_lzss_stream(payload[i:i + 0x8000]), 0x100))
+                for i in range(0, len(payload), 0x8000)]
+    if method == 0x40:
+        chunks = [payload[i:i + 0x8000]
+                  for i in range(0, len(payload), 0x8000)]
+        return [(0x40, _shape3_block(chunk, state, i == 0))
+                for i, chunk in enumerate(chunks)]
+    raise ValueError("now: unsupported method %d" % method)
+
+
+def now_archive(entries, trailer=True, created=0xC9C00000,
+                modified=0xC9C00000):
+    """A Now Compress file or archive built from ``entries``.
+
+    Each entry is a dict with ``path`` ('/'-separated; folders are
+    derived from the paths), ``data``, and optionally ``rsrc``,
+    ``type``, ``creator``, ``method`` (0, 1, 0x20, 0x21, 0x40), and
+    ``finder_flags``.  A fork pair of zero bytes produces a member
+    with no data area.  ``trailer`` adds the 16-byte archive trailer;
+    without it the file ends exactly where the last member's data
+    area does.
+    """
+    # Expand paths into emission order (folders first, depth-first),
+    # deriving each directory's direct-child count from the entry list.
+    order = []
+    open_dirs = []
+
+    def close_past(depth):
+        while len(open_dirs) > depth:
+            open_dirs.pop()
+
+    for entry in entries:
+        parts = entry["path"].split("/")
+        dirs, leaf = parts[:-1], parts[-1]
+        for i, d in enumerate(dirs):
+            if i < len(open_dirs) and open_dirs[i] == d:
+                continue
+            close_past(i)
+            open_dirs.append(d)
+            order.append(("dir", tuple(dirs[:i + 1])))
+        close_past(len(dirs))
+        order.append(("file", tuple(parts), entry))
+    close_past(0)
+
+    # Direct-child count for every folder in the tree, derived dirs
+    # included: count paths one level below each folder.
+    all_paths = set()
+    for entry in entries:
+        parts = entry["path"].split("/")
+        for i in range(1, len(parts) + 1):
+            all_paths.add(tuple(parts[:i]))
+    dir_counts = {}
+    for path in all_paths:
+        prefix = path
+        count = sum(1 for other in all_paths
+                    if other[:len(prefix)] == prefix and len(other) == len(prefix) + 1)
+        dir_counts["/".join(path)] = count
+
+    record_size = 110
+    header_size = 24
+    cursor = header_size + record_size * len(order)
+    state = NowEncoderState()
+    members = {}
+    area_bounds = {}
+    for kind, *rest in order:
+        if kind != "file":
+            continue
+        path, entry = rest[0], rest[1]
+        key = "/".join(path)
+        data_fork = entry.get("data", b"")
+        rsrc = entry.get("rsrc", b"")
+        forkpair = rsrc + data_fork
+        if not forkpair:
+            area_bounds[key] = (cursor, cursor)
+            continue
+        blocks = _now_member_blocks(forkpair, entry.get("method", 0), state)
+        table_size = 4 + 8 * len(blocks) + 8
+        first = cursor + table_size
+        area = bytearray(struct.pack(">I", first))
+        endoff = first
+        recs = []
+        for mode, block in blocks:
+            endoff += len(block) + 4
+            recs.append((mode, endoff))
+        at = 4
+        total = first
+        for mode, block_end in recs:
+            rec = struct.pack(">HHI", mode, 0, block_end)
+            area += rec
+            total += _sum32(rec)
+            at += 8
+        area += b"\0\0\0\0"
+        total += 0
+        area += struct.pack(">I", total & 0xFFFFFFFF)
+        for mode, block in blocks:
+            area += block + struct.pack(">I", _sum32(block))
+        members[key] = bytes(area)
+        area_bounds[key] = (cursor, cursor + len(area))
+        cursor += len(area)
+
+    out = bytearray(b"\0\x02" + b"\0" * 6)
+    out += struct.pack(">I", len(order))
+    out += b"\0" * 12
+    assert len(out) == header_size
+
+    for item in order:
+        if item[0] == "dir":
+            path = item[1]
+            rec = bytearray(record_size)
+            leaf = path[-1].encode("mac_roman")[:31]
+            rec[0] = len(leaf)
+            rec[1:1 + len(leaf)] = leaf
+            struct.pack_into(">H", rec, 36, 0x10)
+            struct.pack_into(">II", rec, 54, created, modified)
+            struct.pack_into(">H", rec, 82,
+                             dir_counts.get("/".join(path), 0))
+            rec[106:110] = struct.pack(">I", _sum32(rec[:106]))
+            out += rec
+            continue
+        path, entry = item[1], item[2]
+        key = "/".join(path)
+        rec = bytearray(record_size)
+        leaf = path[-1].encode("mac_roman")[:31]
+        rec[0] = len(leaf)
+        rec[1:1 + len(leaf)] = leaf
+        rec[38:42] = entry.get("type", b"TEXT")
+        rec[42:46] = entry.get("creator", b"TLst")
+        struct.pack_into(">H", rec, 46, entry.get("finder_flags", 0))
+        struct.pack_into(">II", rec, 54, created, modified)
+        data_fork = entry.get("data", b"")
+        rsrc = entry.get("rsrc", b"")
+        start, end = area_bounds.get(key, (cursor, cursor))
+        struct.pack_into(">I", rec, 86, len(data_fork))
+        struct.pack_into(">I", rec, 90, len(rsrc))
+        struct.pack_into(">I", rec, 98, start)
+        struct.pack_into(">I", rec, 102, end)
+        rec[106:110] = struct.pack(">I", _sum32(rec[:106]))
+        out += rec
+
+    for item in order:
+        if item[0] != "file":
+            continue
+        area = members.get("/".join(item[1]))
+        if area:
+            out += area
+    if trailer:
+        tail = bytearray(16)
+        struct.pack_into(">I", tail, 0, cursor)
+        struct.pack_into(">H", tail, 4, 1)
+        struct.pack_into(">H", tail, 10, 1)
+        struct.pack_into(">I", tail, 12, _sum32(tail[:12]))
+        out += tail
+    return bytes(out)
