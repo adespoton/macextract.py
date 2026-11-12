@@ -1,5 +1,13 @@
 macextract: Copyright (c) 2026 the macextract authors.
 
+This project is a Python conversion of the C macextract project
+(uzTools/MacExtract), itself 0BSD. The Python code is a reimplementation
+guided by published format specifications (Peter N. Lewis's BinHex 4.0
+Definition, the MacBinary II and III standards, RFC 1740, RFC 1741,
+RFC 1951, RFC 1952, APPNOTE.TXT, POSIX ustar, and the Unarchiver wiki)
+and by the behaviour of the C macextract project; it is not transcribed
+from it.
+
 Everything in this repository is licensed under the 0BSD licence (see
 LICENSE), except:
 
@@ -16,9 +24,5 @@ LICENSE), except:
     covered by either licence above. They are reproduced for
     interoperability, exactly as the C project does.
 
-This project is a clean-room reimplementation guided by published
-format specifications (Peter N. Lewis's BinHex 4.0 Definition, the
-MacBinary II and III standards, RFC 1740, RFC 1741, RFC 1951, RFC 1952,
-APPNOTE.TXT, POSIX ustar, and the Unarchiver wiki) and by the behaviour
-of the C macextract project. The Python standard library's zlib is used
-for DEFLATE; it is under the zlib licence, not ours.
+The Python standard library's zlib is used for DEFLATE; it is under the
+zlib licence, not ours.

@@ -3,13 +3,17 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "macextract"
+name = "macextract.py"
 version = "0.1.0"
-description = "Read classic Macintosh archives (MacBinary, BinHex, AppleSingle/Double, PackIt and more) from Python"
+description = "Read classic Macintosh archives (MacBinary, BinHex, AppleSingle/Double, PackIt and more) from Python; the Python conversion of the MacExtract project"
 readme = "README.md"
 license = "0BSD"
 requires-python = ">=3.9"
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/adespoton/macextract.py"
+Repository = "https://github.com/adespoton/macextract.py"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

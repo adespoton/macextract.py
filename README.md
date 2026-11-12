@@ -1,6 +1,16 @@
-# macextract
+# macextract.py
 
-Python library for reading classic Macintosh archives.
+Python library for reading classic Macintosh archives. A Python
+conversion of the [MacExtract](https://github.com/uzTools/MacExtract)
+project (uzTools/MacExtract, C); the formats are reimplemented from
+published specifications and the tested behavior of the C project, not
+transcribed from it.
+
+The import package is `macextract`:
+
+    pip install macextract.py
+
+    pip install git+https://github.com/adespoton/macextract.py
 
 Pure standard library, no dependencies. Read-only.
 
