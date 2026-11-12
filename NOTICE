@@ -1,0 +1,24 @@
+macextract: Copyright (c) 2026 the macextract authors.
+
+Everything in this repository is licensed under the 0BSD licence (see
+LICENSE), except:
+
+  * Files marked "SPDX-License-Identifier: LGPL-2.1-or-later" are
+    licensed under the GNU Lesser General Public License, version 2.1
+    or later (see LICENSE-LGPL-2.1). These files are ports of code the
+    C macextract project carries from XADMaster / libxad / macutils
+    (themselves LGPL-2.1-or-later).
+
+  * src/macextract/ss_dict.py, when added, contains 9,679 bytes that
+    are Copyright (c) 1993 Aladdin Systems, Inc. — the priming tables
+    StuffIt SpaceSaver's LZSS starts its window with. They are data,
+    needed to decode SpaceSaver streams; they are not code and are not
+    covered by either licence above. They are reproduced for
+    interoperability, exactly as the C project does.
+
+This project is a clean-room reimplementation guided by published
+format specifications (Peter N. Lewis's BinHex 4.0 Definition, the
+MacBinary II and III standards, RFC 1740, RFC 1741, RFC 1951, RFC 1952,
+APPNOTE.TXT, POSIX ustar, and the Unarchiver wiki) and by the behaviour
+of the C macextract project. The Python standard library's zlib is used
+for DEFLATE; it is under the zlib licence, not ours.
