@@ -340,3 +340,105 @@ def mime_appledouble(name=b"Doc", data=b"data-fork-bytes", rsrc=b"rsrc-bytes",
     headers = ("MIME-Version: 1.0\r\n"
                "Content-Type: multipart/appledouble; boundary=\"%s\"\r\n" % boundary)
     return mime_message([first, second], boundary=boundary, headers=headers, preamble="")
+
+
+import heapq
+from collections import Counter
+
+
+def huffman_encode(payload):
+    """Encode bytes as a bit-serialized Huffman stream (tree + codes),
+    matching the layout the PackIt reader (and StuffIt method 3 /
+    DiskDoubler method 4) consumes. Test-side counterpart only."""
+    if not payload:
+        raise ValueError("huffman_encode needs at least one byte")
+    freq = Counter(payload)
+    heap = [(weight, index, ("leaf", symbol)) for index, (symbol, weight)
+            in enumerate(sorted(freq.items()))]
+    heapq.heapify(heap)
+    counter = len(heap)
+    while len(heap) > 1:
+        weight_a, _, node_a = heapq.heappop(heap)
+        weight_b, _, node_b = heapq.heappop(heap)
+        heapq.heappush(heap, (weight_a + weight_b, counter,
+                              ("node", node_a, node_b)))
+        counter += 1
+    root = heap[0][2]
+
+    def serialize(node):
+        if node[0] == "leaf":
+            return "1" + format(node[1], "08b")
+        return "0" + serialize(node[1]) + serialize(node[2])
+
+    bits = serialize(root)
+    if root[0] != "leaf":
+        codes = {}
+
+        def assign(node, prefix):
+            if node[0] == "leaf":
+                codes[node[1]] = prefix
+                return
+            assign(node[1], prefix + "0")
+            assign(node[2], prefix + "1")
+
+        assign(root, "")
+        bits += "".join(codes[byte] for byte in payload)
+    pad = (-len(bits)) % 8
+    bits += "0" * pad
+    return bytes(int(bits[i:i + 8], 2) for i in range(0, len(bits), 8))
+
+
+def _packit_header(name, data_len, rsrc_len, type=b"TEXT", creator=b"TTxt",
+                   flags=0x0100, locked=False, created=400000000,
+                   modified=400000100):
+    name_bytes = name.encode("mac_roman") if isinstance(name, str) else name
+    header = bytearray(94)
+    header[0] = len(name_bytes)
+    header[1:64] = name_bytes.ljust(63, b"\0")
+    header[64:68] = type
+    header[68:72] = creator
+    header[72] = (flags >> 8) & 0xFF
+    struct.pack_into(">H", header, 74, 1 if locked else 0)
+    struct.pack_into(">II", header, 76, data_len, rsrc_len)
+    struct.pack_into(">II", header, 84, created, modified)
+    # Header CRC polynomial is not established by the format notes;
+    # the field exists, we write a fixed value.
+    struct.pack_into(">H", header, 92, 0x1234)
+    return bytes(header)
+
+
+def packit(files=((b"TestFile", b"hello world", b"", b"TEXT", b"TTxt"),),
+           kind="stored", tail_word=True):
+    """Build a .pit image. ``files`` items are
+    (name, data, rsrc, type, creator) tuples or full dicts.
+    ``kind`` is 'stored', 'huffman' or 'encrypted'."""
+    out = bytearray()
+    for spec in files:
+        if isinstance(spec, dict):
+            name = spec.get("name", b"TestFile")
+            data = spec.get("data", b"")
+            rsrc = spec.get("rsrc", b"")
+            type_ = spec.get("type", b"TEXT")
+            creator = spec.get("creator", b"TTxt")
+            flags = spec.get("flags", 0x0100)
+            locked = spec.get("locked", False)
+            created = spec.get("created", 400000000)
+            modified = spec.get("modified", 400000100)
+            spec_kind = spec.get("kind", kind)
+        else:
+            name, data, rsrc, type_, creator = spec
+            flags, locked, created, modified, spec_kind = 0x0100, False, 400000000, 400000100, kind
+        header = _packit_header(name, len(data), len(rsrc), type_, creator,
+                                flags, locked, created, modified)
+        stream = header + data + rsrc + b"\xde\xad"
+        if spec_kind == "stored":
+            out += b"PMag" + stream
+        elif spec_kind == "huffman":
+            out += b"PMa4" + huffman_encode(stream)
+        elif spec_kind == "encrypted":
+            out += b"PMa5" + stream
+        else:
+            raise ValueError("unknown kind %r" % spec_kind)
+    if tail_word:
+        out += b"PEnd"
+    return bytes(out)

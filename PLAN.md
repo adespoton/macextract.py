@@ -17,9 +17,10 @@ begins.
 5. [x] uuencode (`.uu`), btoa (`.btoa`), base64/MIME attachments —
    done; MU multi-file layouts merged for uu; multipart/appledouble
    pairs forked entries; pasted uuencode in bodies extracted.
-6. [ ] PackIt (`.pit`) — container + CRC-16/XMODEM verification;
-   password-protected entries detected (decrypt unsupported → clear
-   error or implement if cipher is simple enough to redo from spec).
+6. [x] PackIt (`.pit`) — stored + Huffman-coded entries; PMa5
+   (encrypted) refused with a clear error. CRC polynomial is not
+   established by the format notes, so the header and fork CRCs are
+   carried but not checked (matches the C reader).
 7. [ ] AppleLink Package Translator (`.pkg`) — LZW-compressed container.
 8. [ ] Filer wiring (separate task in FILER_IMPLEMENTATION_PLAN.md):
    list archives in a Filer window, extract to a folder, open entries.
