@@ -180,3 +180,30 @@ def applesingle(name=b"TestFile", data=b"hello world", rsrc=b"",
     for _, payload in entries:
         parts.append(payload)
     return b"".join(parts)
+
+
+def uuencode(name="TestFile", data=b"hello world", mode=0o644,
+             rsrc=None, finfo=None, extra_segments=()):
+    """Build a uuencode stream; optionally with MU-style fork sections."""
+    segments = [(mode, name, data)]
+    if rsrc is not None:
+        segments.append((mode, name + ".rsrc", rsrc))
+    if finfo is not None:
+        segments.append((mode, name + ".finfo", finfo))
+    segments.extend(extra_segments)
+    out = []
+    for seg_mode, seg_name, payload in segments:
+        out.append("begin %03o %s" % (seg_mode, seg_name))
+        i = 0
+        while i < len(payload):
+            chunk = payload[i:i + 45]
+            i += len(chunk)
+            line = chr(len(chunk) + 32)
+            for j in range(0, len(chunk), 3):
+                b = chunk[j:j + 3].ljust(3, b"\0")
+                n = (b[0] << 16) | (b[1] << 8) | b[2]
+                line += "".join(chr(((n >> shift) & 0x3F) + 32) for shift in (18, 12, 6, 0))
+            out.append(line)
+        out.append("`")
+        out.append("end")
+    return ("\n".join(out) + "\n").encode("ascii")
