@@ -39,8 +39,23 @@ begins.
    be used yet, so no password is asked for), and Optimizer modules
    other than id 255 (nothing to undo).
 
-Later batches (each with tests): StuffIt 5 →
-StuffIt arsenic → Compact Pro → DiskDoubler → Now Compress →
+10. [x] StuffIt 5 (`.sit`) — the 80-byte banner probe, the entry walk
+    with parent-offset folder paths (folders and the marker entry
+    after each one are not files), the second block's Finder-info
+    gate, comments, entry versions 1 and 3, UTF-8 names.  Methods 0,
+    1, 2, 3 and 13 through the classic codecs; methods 14 and 15
+    refused by name (Arsenic is next).  Encryption works: the password
+    is graded against the archive header's five-byte MD5-of-MD5 hash
+    (PasswordRequiredError without one, BadPasswordError for the
+    wrong), then each keyed fork is RC4 under MD5(password)[:5] plus
+    the fork's own five clear bytes — the scheme the parent project
+    measured on archives Aladdin's own software wrote, including the
+    hash's position behind archive flag bits 4 and 5.  The entry
+    header CRC is carried but not checked, same as the reference
+    readers.
+
+Later batches (each with tests): StuffIt arsenic → Compact Pro →
+DiskDoubler → Now Compress →
 MacCompress (.Z) → ARC → LZH/LHA → PackIt splits → DiskDoubler/StuffIt
 split volumes → MAR → Apple Backup → Tomes → zip/gzip/tar → StuffIt
 SpaceSaver (with Aladdin tables, attribution per NOTICE). StuffIt X never. PC formats (RAR, 7z,

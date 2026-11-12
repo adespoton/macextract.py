@@ -45,10 +45,13 @@ listed under *Supported* is not supported yet. See
 | PackIt | `.pit` | stored and Huffman-coded; PMa5 refused (cipher undocumented) |
 | AppleLink package | `.pkg` | SqueezePlay; stored and LZW-compressed forks, v0/v1 |
 | StuffIt classic | `.sit` | methods 0/1/2/3/13 (stored, RLE-90, LZW-14, Huffman, LZ+Huffman), folders, CRC-16 checks; other methods, encryption and optimizer modules refused by name |
+| StuffIt 5 | `.sit` (banner) | folders with parent-offset paths, UTF-8 names, Finder-info gate, comments, entry versions 1 and 3; methods 0/1/2/3/13; encrypted archives via `password=` (MD5 grade, RC4 forks); methods 14/15 refused by name |
 
 ## Not supported (yet)
 
-StuffIt 5/X, Compact Pro, DiskDoubler, MacCompress, Now
+StuffIt X, StuffIt classic's methods 5/6/7/8/14/15, StuffIt 5's
+methods 14 and 15 (Arsenic is next), Compact Pro, DiskDoubler,
+MacCompress, Now
 Compress, StuffIt SpaceSaver, Alysis SuperDisk!, Private File, ARC, LZH/LHA, MAR, Apple
 Backup, Tomes, zip/gzip/tar/.Z, RAR, 7-Zip, bzip2, xz, and PC formats.
 StuffIt X and every other PC/modern format are out of scope, same as

@@ -5,10 +5,12 @@ committed. Writers aim to match the published formats, including the
 weird corners the tests exercise.
 """
 
+import hashlib
 import struct
 
 from macextract import _sit13
 from macextract._crc16 import crc16_arc, crc16_ccitt
+from macextract._rc4 import rc4
 
 MAC_EPOCH = 2082844800
 
@@ -863,3 +865,265 @@ def stuffit(files=(), version=1, magic=b"SIT!", totalsize=None):
     size = len(header) + len(body) if totalsize is None else totalsize
     struct.pack_into(">I", header, 6, size)
     return bytes(header) + body
+
+
+# --- StuffIt 5 ---------------------------------------------------------
+
+SIT5_BANNER = (b"StuffIt (c)1997-2024 Aladdin Systems, Inc., "
+               b"http://www.aladdinsys.com/StuffIt/\r\n")
+
+
+def _s5_md5_5(data):
+    return hashlib.md5(data, usedforsecurity=False).digest()[:5]
+
+
+def _s5_pw_bytes(password):
+    if isinstance(password, str):
+        return password.encode("utf-8")
+    return bytes(password)
+
+
+def _s5_name(name):
+    if isinstance(name, str):
+        return name.encode("utf-8")
+    return bytes(name)
+
+
+def _sit5_compress(method, payload, spec):
+    if method in (0, 1, 2, 3, 13):
+        return _sit_compress(method, payload, spec)
+    # No encoder for the rest: the bytes stand as stored and the method
+    # byte says what they are, which the reader must refuse by name.
+    return payload
+
+
+def _sit5_second_block(entry_version, has_rsrc, rsrcfields, rsrc_key,
+                       type_, creator, finder_flags):
+    """The block after the comment: flags, its own CRC-16/ARC gate
+    (entry version 1 only), then the Finder info.  With a resource
+    fork, the 14 fork-field bytes and the fork's key bytes are inside
+    that CRC too."""
+    block = bytearray(36 if entry_version == 1 else 32)
+    struct.pack_into(">H", block, 0, 1 if has_rsrc else 0)
+    block[4:8] = type_
+    block[8:12] = creator
+    struct.pack_into(">H", block, 12, finder_flags)
+    if entry_version == 1:
+        covered = bytes(block)
+        if has_rsrc:
+            covered += rsrcfields
+        if rsrc_key:
+            covered += rsrc_key
+        struct.pack_into(">H", block, 2, crc16_arc(covered))
+    return bytes(block)
+
+
+def _sit5_header(entry_version, eflags, diroffs, name, sizes, mid,
+                 comment, comment_space, block, extras=b""):
+    """One entry header: 46 fixed bytes, then the fork-count or method
+    bytes, the name, the comment (only when the header size leaves
+    room), the second block and any resource-fork fields.  With
+    ``comment_space`` False the header size stops at the name — the
+    comment gate sees no room — but the block still follows in the
+    bytes.  The header CRC at 32 stays 0 here; ``stuffit5`` fills it
+    once every offset is known."""
+    tail = mid + name
+    headersize = 46 + len(tail)
+    if comment_space:
+        text = comment or b""
+        tail += struct.pack(">HH", len(text), 0) + text
+    tail += block + extras
+    if comment_space:
+        headersize = 46 + len(tail)
+    fixed = bytearray(46)
+    struct.pack_into(">I", fixed, 0, 0xA5A5A5A5)
+    fixed[4] = entry_version
+    struct.pack_into(">H", fixed, 6, headersize)
+    fixed[9] = eflags
+    struct.pack_into(">I", fixed, 10, 400000000)
+    struct.pack_into(">I", fixed, 14, 400000100)
+    struct.pack_into(">I", fixed, 26, diroffs)
+    struct.pack_into(">H", fixed, 30, len(name))
+    fixed[34:46] = sizes
+    return bytes(fixed) + tail
+
+
+def stuffit5(files=(), password=None, blocks14=False, comment_block=False,
+             archive_comment=b"", style=b"", entry_version=1,
+             comment_space=True, marker=True, marker_headersize=None,
+             hash_len=None, count=None, firstoffs=None, totalsize=None,
+             bad_id=False):
+    """Build a StuffIt 5 image.  ``files`` items are dicts (or
+    ``(name, data)`` tuples); a dict with ``folder`` opens a folder,
+    a dict with ``folder_end`` closes one — every folder is followed by
+    the format's marker entry.  File keys: name, data, rsrc (its
+    presence sets the resource-fork flag), method, rsrc_method,
+    selector/f_bit (method 13), encrypted, data_key / rsrc_key (five
+    bytes), data_passlen / rsrc_passlen (override, to misstate the
+    key length), comment, entry_version, datacomp_extra, type,
+    creator, finder_flags, and bad_data_crc / bad_rsrc_crc /
+    bad_block_crc.  Archive keys: password (adds the flag-0x80 hash),
+    blocks14, comment_block, archive_comment, style, entry_version,
+    comment_space, marker, marker_headersize, hash_len, count,
+    firstoffs, totalsize, bad_id."""
+    if archive_comment:
+        comment_block = True
+    arch_flags = ((0x80 if password is not None else 0)
+                  | (0x10 if blocks14 else 0)
+                  | (0x20 if comment_block else 0))
+
+    out = bytearray(100)
+    out[0:80] = SIT5_BANNER
+    out[82] = 5
+    out[83] = arch_flags
+    if blocks14:
+        out += b"\0" * 14
+    if comment_block:
+        out += struct.pack(">HH", len(archive_comment), len(style))
+    if password is not None:
+        key5 = _s5_md5_5(_s5_pw_bytes(password))
+        stored_hash = _s5_md5_5(key5) + b"\0" * 16
+        out += bytes([5 if hash_len is None else hash_len]) + stored_hash
+    out += archive_comment + style
+    first = len(out)
+
+    pos_list = []
+    dir_slots = {}
+    dir_children = {}
+    stack = []
+    root_count = 0
+
+    for spec in files:
+        if isinstance(spec, tuple):
+            spec = {"name": spec[0], "data": spec[1]}
+        diroffs = stack[-1] if stack else 0
+
+        if "folder" in spec:
+            if stack:
+                dir_children[stack[-1]] += 1
+            else:
+                root_count += 1
+            name = _s5_name(spec["folder"])
+            ev = spec.get("entry_version", entry_version)
+            block = _sit5_second_block(
+                ev, False, b"", None, spec.get("type", b"TEXT"),
+                spec.get("creator", b"TTxt"), spec.get("finder_flags", 0x0100))
+            pos = len(out)
+            pos_list.append(pos)
+            out += _sit5_header(
+                ev, 0x40, diroffs, name, b"\0" * 12,
+                struct.pack(">H", 0), spec.get("comment"), comment_space, block)
+            dir_slots[pos] = pos + 46
+            dir_children[pos] = 0
+            if marker:
+                pos_list.append(len(out))
+                marker_bytes = _sit5_header(
+                    1, 0x40, 0, b"", b"\xff\xff\xff\xff" + b"\0" * 8,
+                    b"\0\0", None, False, b"")
+                if marker_headersize is not None:
+                    marker_bytes = (marker_bytes[:6]
+                                    + struct.pack(">H", marker_headersize)
+                                    + marker_bytes[8:])
+                out += marker_bytes
+            stack.append(pos)
+            continue
+
+        if spec.get("folder_end"):
+            if stack:
+                stack.pop()
+            continue
+
+        if stack:
+            dir_children[stack[-1]] += 1
+        else:
+            root_count += 1
+
+        name = _s5_name(spec.get("name", b"File"))
+        data = spec.get("data", b"")
+        has_rsrc = "rsrc" in spec
+        rsrc = spec.get("rsrc", b"")
+        ev = spec.get("entry_version", entry_version)
+        encrypted = bool(spec.get("encrypted"))
+        eflags = 0x20 if encrypted else 0
+        dmethod = spec.get("method", 0)
+        rmethod = spec.get("rsrc_method", 0)
+        dstored = _sit5_compress(dmethod, data, spec)
+        rstored = _sit5_compress(rmethod, rsrc, spec) if has_rsrc else b""
+        dkey = _s5_name(spec.get("data_key", b"DATKY"))
+        rkey = _s5_name(spec.get("rsrc_key", b"RSRKY"))
+
+        dpass = spec.get("data_passlen")
+        if dpass is None:
+            dpass = 5 if (encrypted and data) else 0
+        rpass = spec.get("rsrc_passlen")
+        if rpass is None:
+            rpass = 5 if (encrypted and rsrc) else 0
+
+        if encrypted and password is not None:
+            akey = _s5_md5_5(_s5_pw_bytes(password))
+            if data:
+                dstored = rc4(dstored, akey + dkey)
+            if rsrc:
+                rstored = rc4(rstored, akey + rkey)
+
+        datacrc = crc16_arc(data)
+        rsrccrc = crc16_arc(rsrc)
+        if spec.get("bad_data_crc"):
+            datacrc ^= 0xFFFF
+        if spec.get("bad_rsrc_crc"):
+            rsrccrc ^= 0xFFFF
+
+        sizes = struct.pack(
+            ">IIH", len(data), len(dstored) + spec.get("datacomp_extra", 0),
+            datacrc) + b"\0\0"
+        mid = bytes([dmethod, dpass]) + ((dkey * 4)[:dpass] if dpass else b"")
+
+        rsrcfields = b""
+        rsrc_key_crc = None
+        if has_rsrc:
+            rsrcfields = struct.pack(
+                ">IIHHBB", len(rsrc), len(rstored), rsrccrc, 0,
+                rmethod, rpass)
+            if rpass:
+                rsrc_key_crc = (rkey * 4)[:rpass]
+        block = _sit5_second_block(
+            ev, has_rsrc, rsrcfields, rsrc_key_crc,
+            spec.get("type", b"TEXT"), spec.get("creator", b"TTxt"),
+            spec.get("finder_flags", 0x0100))
+        if spec.get("bad_block_crc"):
+            block = block[:2] + bytes([block[2] ^ 0xFF]) + block[3:]
+        extras = b""
+        if has_rsrc:
+            extras = rsrcfields + ((rkey * 4)[:rpass] if rpass else b"")
+
+        pos = len(out)
+        pos_list.append(pos)
+        out += _sit5_header(ev, eflags, diroffs, name, sizes, mid,
+                            spec.get("comment"), comment_space, block, extras)
+        out += rstored + dstored
+
+    # Offsets are only known now: child counts, the prev/next chain,
+    # then every entry header's CRC over its own header size with the
+    # CRC field zeroed.
+    for p, slot in dir_slots.items():
+        struct.pack_into(">H", out, slot, dir_children[p])
+    for i, p in enumerate(pos_list):
+        struct.pack_into(">I", out, p + 18, pos_list[i - 1] if i else 0)
+        struct.pack_into(">I", out, p + 22,
+                         pos_list[i + 1] if i + 1 < len(pos_list) else 0)
+    for p in pos_list:
+        size = struct.unpack_from(">H", out, p + 6)[0]
+        out[p + 32] = out[p + 33] = 0
+        if size and p + size <= len(out):
+            struct.pack_into(">H", out, p + 32,
+                             crc16_arc(bytes(out[p:p + size])))
+
+    struct.pack_into(">I", out, 84,
+                     len(out) if totalsize is None else totalsize)
+    struct.pack_into(">H", out, 92,
+                     root_count if count is None else count)
+    struct.pack_into(">I", out, 94, first if firstoffs is None else firstoffs)
+    first = struct.unpack_from(">I", out, 94)[0]
+    if bad_id and first + 4 <= len(out):
+        out[first:first + 4] = b"\0\0\0\0"
+    return bytes(out)
