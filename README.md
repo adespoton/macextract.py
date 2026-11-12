@@ -44,10 +44,11 @@ listed under *Supported* is not supported yet. See
 | MIME attachments | `.eml` | multipart/*, appledouble pairs, pasted uuencode |
 | PackIt | `.pit` | stored and Huffman-coded; PMa5 refused (cipher undocumented) |
 | AppleLink package | `.pkg` | SqueezePlay; stored and LZW-compressed forks, v0/v1 |
+| StuffIt classic | `.sit` | methods 0/1/2/3/13 (stored, RLE-90, LZW-14, Huffman, LZ+Huffman), folders, CRC-16 checks; other methods, encryption and optimizer modules refused by name |
 
 ## Not supported (yet)
 
-StuffIt classic/5/X, Compact Pro, DiskDoubler, MacCompress, Now
+StuffIt 5/X, Compact Pro, DiskDoubler, MacCompress, Now
 Compress, StuffIt SpaceSaver, Alysis SuperDisk!, Private File, ARC, LZH/LHA, MAR, Apple
 Backup, Tomes, zip/gzip/tar/.Z, RAR, 7-Zip, bzip2, xz, and PC formats.
 StuffIt X and every other PC/modern format are out of scope, same as

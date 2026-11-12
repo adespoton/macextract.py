@@ -29,7 +29,17 @@ begins.
    registry, so list, browse, launch and extract work for every
    registered format with no per-format Filer changes.
 
-Later batches (each with tests): StuffIt classic → StuffIt 5 →
+9. [x] StuffIt classic (`.sit`) — archive header, 112-byte entry
+   headers, folder markers as path components, CRC-16/ARC on headers
+   and decoded forks. Compression methods 0 (stored), 1 (RLE-90), 2
+   (LZW 14-bit), 3 (serialized Huffman) and 13 (LZ + canonical
+   Huffman, all five predefined code selectors plus in-stream tables)
+   round-trip both forks. Refused with named errors: methods 5/6/7/8/
+   14/15 (not implemented), every cipher (PassLock included — none can
+   be used yet, so no password is asked for), and Optimizer modules
+   other than id 255 (nothing to undo).
+
+Later batches (each with tests): StuffIt 5 →
 StuffIt arsenic → Compact Pro → DiskDoubler → Now Compress →
 MacCompress (.Z) → ARC → LZH/LHA → PackIt splits → DiskDoubler/StuffIt
 split volumes → MAR → Apple Backup → Tomes → zip/gzip/tar → StuffIt

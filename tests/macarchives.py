@@ -7,7 +7,8 @@ weird corners the tests exercise.
 
 import struct
 
-from macextract._crc16 import crc16_ccitt
+from macextract import _sit13
+from macextract._crc16 import crc16_arc, crc16_ccitt
 
 MAC_EPOCH = 2082844800
 
@@ -604,3 +605,261 @@ def sqp(entries, version=1):
             out += rec
     out += member_bytes
     return bytes(out)
+
+
+def rle90_encode(payload):
+    """RLE-90 (StuffIt method 1): a run of three or more becomes a
+    leading literal plus ``0x90`` and a count byte N (the decoder then
+    emits N bytes in total for the group); ``0x90`` itself is always
+    written ``0x90 0x00``; ``0x90 0x01`` never appears.  Test-side
+    counterpart of ``macextract._rle90.rle90_decode``."""
+    out = bytearray()
+    index = 0
+    size = len(payload)
+    while index < size:
+        byte = payload[index]
+        run = 1
+        while (index + run < size and payload[index + run] == byte
+               and run < 255):
+            run += 1
+        if run >= 3:
+            out += b"\x90\x00" if byte == 0x90 else bytes([byte])
+            out.append(0x90)
+            out.append(run)      # group emits 1 + (run - 1) more = run
+            index += run
+        else:
+            out += b"\x90\x00" if byte == 0x90 else bytes([byte])
+            index += 1
+    return bytes(out)
+
+
+def _sit13_put_meta(writer, value):
+    writer.put(_sit13.META_CODES[value], _sit13.META_LENGTHS[value])
+
+
+def _sit13_put_lengths(writer, lengths):
+    for length in lengths:
+        _sit13_put_meta(writer, length - 1 if length else 31)
+
+
+def _sit13_put_symbol(writer, codes, symbol):
+    length, value = codes[symbol]
+    for bit in range(length - 1, -1, -1):   # MSB of the code leaves first
+        writer.put((value >> bit) & 1, 1)
+
+
+def _sit13_tokens(payload):
+    """Greedy LZ over a 64 KB window, matches of 3..64 bytes.  Candidate
+    starts come from an index of three-byte prefixes, so the scan costs
+    the candidates rather than the whole window."""
+    size = len(payload)
+    index = {}
+    for at in range(max(0, size - 2)):
+        index.setdefault(payload[at:at + 3], []).append(at)
+    tokens = []
+    pos = 0
+    while pos < size:
+        best_len = 0
+        best_dist = 0
+        limit = min(64, size - pos)
+        floor = max(0, pos - 65536)
+        if limit >= 3:
+            for start in reversed(index.get(payload[pos:pos + 3], ())):
+                if start >= pos:
+                    continue
+                if start < floor:
+                    break
+                length = 0
+                while (length < limit
+                       and payload[start + length] == payload[pos + length]):
+                    length += 1
+                if length > best_len:
+                    best_len = length
+                    best_dist = pos - start
+                    if best_len == limit:
+                        break
+        if best_len >= 3:
+            tokens.append(("match", best_len, best_dist))
+            pos += best_len
+        else:
+            tokens.append(("lit", payload[pos]))
+            pos += 1
+    return tokens
+
+
+def sit13_encode(payload, selector=None, f_bit=False, end_marker=False):
+    """Counterpart of ``macextract._sit13.sit13_decode``.  ``selector``
+    None writes dynamic tables through the meta code (``f_bit`` says the
+    second literal/length code repeats the first and is then not
+    written); ``selector`` 1..5 uses a predefined set instead.
+    ``end_marker`` emits the 320 end symbol first, which a decoder must
+    refuse while the fork's length is unfinished."""
+    writer = LsbBitWriter()
+    tokens = _sit13_tokens(payload)
+
+    if selector is None:
+        first_lengths = [9] * 321
+        second_lengths = [9] * 321
+        offset_lengths = [5] * 17
+        writer.put((0x08 if f_bit else 0) | 7, 8)
+        _sit13_put_lengths(writer, first_lengths)
+        if not f_bit:
+            _sit13_put_lengths(writer, second_lengths)
+        _sit13_put_lengths(writer, offset_lengths)
+        first_codes = _sit13.canonical_codes(first_lengths)
+        second_codes = (first_codes if f_bit
+                        else _sit13.canonical_codes(second_lengths))
+        offset_codes = _sit13.canonical_codes(offset_lengths)
+    else:
+        writer.put(selector << 4, 8)
+        first_codes = _sit13.canonical_codes(_sit13.FIRST_LENGTHS[selector - 1])
+        second_codes = _sit13.canonical_codes(_sit13.SECOND_LENGTHS[selector - 1])
+        offset_codes = _sit13.canonical_codes(_sit13.OFFSET_LENGTHS[selector - 1])
+
+    if end_marker:
+        _sit13_put_symbol(writer, first_codes, 320)
+        return writer.flush()
+
+    current = first_codes
+    for token in tokens:
+        if token[0] == "lit":
+            _sit13_put_symbol(writer, current, token[1])
+            current = first_codes
+            continue
+        _, length, distance = token
+        _sit13_put_symbol(writer, current, 253 + length)
+        current = second_codes
+        low = distance - 1
+        bits = 0 if low == 0 else low.bit_length()
+        _sit13_put_symbol(writer, offset_codes, bits)
+        if bits >= 2:
+            writer.put(low - (1 << (bits - 1)), bits - 1)
+    return writer.flush()
+
+
+def _sit_compress(method, payload, spec):
+    if not payload:
+        return b""
+    if method == 0:
+        return payload
+    if method == 1:
+        return rle90_encode(payload)
+    if method == 2:
+        return lzw_compress(payload, maxbits=14, blockmode=True)
+    if method == 3:
+        return huffman_encode(payload)
+    if method == 13:
+        return sit13_encode(payload, selector=spec.get("selector"),
+                            f_bit=spec.get("f_bit", False))
+    raise ValueError("stuffit: no encoder for method %d" % method)
+
+
+def _sit_folder_header(name, marker):
+    if isinstance(name, str):
+        name = name.encode("mac_roman")
+    name = name[:31]
+    hdr = bytearray(112)
+    hdr[0] = marker
+    hdr[1] = marker
+    hdr[2] = len(name)
+    hdr[3:34] = name.ljust(31, b"\0")
+    struct.pack_into(">H", hdr, 34, crc16_arc(bytes(hdr[2:34])))
+    struct.pack_into(">I", hdr, 62, 0xFFFFFFFF)
+    struct.pack_into(">H", hdr, 110, crc16_arc(bytes(hdr[:110])))
+    return bytes(hdr)
+
+
+def _sit_file_header(spec, rsrc, data, rsrc_stored, data_stored):
+    name = spec.get("name", b"TestFile")
+    if isinstance(name, str):
+        name = name.encode("mac_roman")
+    name = name[:31]
+    method = spec.get("method", 0)
+    rsrc_method = spec.get("rsrc_method", 0)
+    encrypt_bit = spec.get("encrypt_bit", 0)
+    dmeth = method | encrypt_bit
+    rmeth = rsrc_method | encrypt_bit
+    if spec.get("optimizer") is not None:
+        dmeth |= 0x40
+    if spec.get("rsrc_optimizer") is not None:
+        rmeth |= 0x40
+
+    hdr = bytearray(112)
+    hdr[0] = rmeth
+    hdr[1] = dmeth
+    hdr[2] = len(name)
+    hdr[3:34] = name.ljust(31, b"\0")
+    struct.pack_into(">H", hdr, 34, crc16_arc(bytes(hdr[2:34])))
+    if spec.get("bad_name_crc"):
+        hdr[34] ^= 0xFF
+    struct.pack_into(">H", hdr, 36, 0x8000 if spec.get("locked") else 0)
+    struct.pack_into(">I", hdr, 62, 0xFFFFFFFF)
+    hdr[66:70] = spec.get("type", b"TEXT")
+    hdr[70:74] = spec.get("creator", b"TTxt")
+    struct.pack_into(">H", hdr, 74, spec.get("finder_flags", 0x0100))
+    struct.pack_into(">I", hdr, 76, spec.get("created", 400000000))
+    struct.pack_into(">I", hdr, 80, spec.get("modified", 400000100))
+    struct.pack_into(">II", hdr, 84, len(rsrc), len(data))
+    struct.pack_into(">II", hdr, 92, len(rsrc_stored), len(data_stored))
+    struct.pack_into(">H", hdr, 100, crc16_arc(rsrc))
+    struct.pack_into(">H", hdr, 102, crc16_arc(data))
+    if spec.get("bad_data_crc"):
+        hdr[102] ^= 0xFF
+    if spec.get("bad_rsrc_crc"):
+        hdr[100] ^= 0xFF
+    if spec.get("optimizer") is not None:
+        hdr[106] = spec["optimizer"]
+    if spec.get("data_encrypt_id") is not None:
+        hdr[107] = spec["data_encrypt_id"]
+    if spec.get("rsrc_optimizer") is not None:
+        hdr[108] = spec["rsrc_optimizer"]
+    if spec.get("rsrc_encrypt_id") is not None:
+        hdr[109] = spec["rsrc_encrypt_id"]
+    struct.pack_into(">H", hdr, 110, crc16_arc(bytes(hdr[:110])))
+    if spec.get("bad_header_crc"):
+        hdr[110] ^= 0xFFFF
+    return bytes(hdr)
+
+
+def stuffit(files=(), version=1, magic=b"SIT!", totalsize=None):
+    """Build a StuffIt classic image.  ``files`` items are dicts (or
+    ``(name, data)`` tuples); a dict with ``folder`` starts a folder,
+    a dict with ``folder_end`` closes one.  File keys: name, data,
+    rsrc, method, rsrc_method (0 stored, 1 RLE-90, 2 LZW-14, 3
+    Huffman, 13 LZ+Huffman), selector/f_bit (method 13), locked,
+    type, creator, finder_flags, created, modified, encrypt_bit (0x80
+    or 0x10), optimizer / rsrc_optimizer (id), and the bad_* booleans
+    that flip a stored CRC."""
+    records = []
+    bodies = []
+    count = 0
+    for spec in files:
+        if isinstance(spec, tuple):
+            spec = {"name": spec[0], "data": spec[1]}
+        if "folder" in spec:
+            records.append(_sit_folder_header(spec["folder"], 0x20))
+            bodies.append(b"")
+            continue
+        if spec.get("folder_end"):
+            records.append(_sit_folder_header(spec.get("name", b""), 0x21))
+            bodies.append(b"")
+            continue
+        data = spec.get("data", b"")
+        rsrc = spec.get("rsrc", b"")
+        data_stored = _sit_compress(spec.get("method", 0), data, spec)
+        rsrc_stored = _sit_compress(spec.get("rsrc_method", 0), rsrc, spec)
+        records.append(_sit_file_header(spec, rsrc, data,
+                                        rsrc_stored, data_stored))
+        bodies.append(rsrc_stored + data_stored)
+        count += 1
+
+    header = bytearray(22)
+    header[0:4] = magic.ljust(4, b"\0")[:4]
+    struct.pack_into(">H", header, 4, count)
+    header[10:14] = b"rLau"
+    header[14] = version
+    # Each header is followed immediately by its fork bytes.
+    body = b"".join(rec + fork for rec, fork in zip(records, bodies))
+    size = len(header) + len(body) if totalsize is None else totalsize
+    struct.pack_into(">I", header, 6, size)
+    return bytes(header) + body
