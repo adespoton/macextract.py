@@ -29,11 +29,12 @@ listed under *Supported* is not supported yet. See
 | base64 | `.b64` (also `begin-base64` shape) | RFC 2045, lenient decoder |
 | MIME attachments | `.eml` | multipart/*, appledouble pairs, pasted uuencode |
 | PackIt | `.pit` | stored and Huffman-coded; PMa5 refused (cipher undocumented) |
+| AppleLink package | `.pkg` | SqueezePlay; stored and LZW-compressed forks, v0/v1 |
 
 ## Not supported (yet)
 
 StuffIt classic/5/X, Compact Pro, DiskDoubler, MacCompress, Now
-Compress, StuffIt SpaceSaver, Alysis SuperDisk!, Private File, AppleLink, ARC, LZH/LHA, MAR, Apple
+Compress, StuffIt SpaceSaver, Alysis SuperDisk!, Private File, ARC, LZH/LHA, MAR, Apple
 Backup, Tomes, zip/gzip/tar/.Z, RAR, 7-Zip, bzip2, xz, and PC formats.
 StuffIt X and every other PC/modern format are out of scope, same as
 the C project.

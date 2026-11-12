@@ -21,7 +21,9 @@ begins.
    (encrypted) refused with a clear error. CRC polynomial is not
    established by the format notes, so the header and fork CRCs are
    carried but not checked (matches the C reader).
-7. [ ] AppleLink Package Translator (`.pkg`) — LZW-compressed container.
+7. [x] AppleLink Package Translator (`.pkg`) — SqueezePlay; stored and
+   Unix compress LZW (13-bit, block mode) forks; v0 flat and v1 HFS
+   directories; folder levels become path components.
 8. [ ] Filer wiring (separate task in FILER_IMPLEMENTATION_PLAN.md):
    list archives in a Filer window, extract to a folder, open entries.
    Not done here — this library never imports the Filer.

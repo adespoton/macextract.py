@@ -442,3 +442,165 @@ def packit(files=((b"TestFile", b"hello world", b"", b"TEXT", b"TTxt"),),
     if tail_word:
         out += b"PEnd"
     return bytes(out)
+
+
+class LsbBitWriter:
+    def __init__(self):
+        self.bitbuf = 0
+        self.nbits = 0
+        self.out = bytearray()
+
+    def put(self, code, size):
+        self.bitbuf |= code << self.nbits
+        self.nbits += size
+        while self.nbits >= 8:
+            self.out.append(self.bitbuf & 0xFF)
+            self.bitbuf >>= 8
+            self.nbits -= 8
+
+    def flush(self):
+        if self.nbits:
+            self.out.append(self.bitbuf & 0xFF)
+            self.bitbuf = 0
+            self.nbits = 0
+        return bytes(self.out)
+
+
+def lzw_compress(data, maxbits=13, blockmode=True):
+    """compress(1)-compatible encoder. Mirrors the decoder's table-add
+    schedule exactly: the first emitted code adds no entry (the decoder
+    has no previous string for it); every later code adds
+    prev_string + first byte of the current string, so the width bumps
+    land on the same code position on both sides. No clear codes are
+    emitted; the table never fills for test-sized inputs."""
+    table = {bytes([i]): i for i in range(256)}
+    next_code = 257 if blockmode else 256
+    symbolsize = 9
+    maxsymbols = 1 << maxbits
+    writer = LsbBitWriter()
+
+    def add(entry):
+        nonlocal next_code, symbolsize
+        if next_code < maxsymbols:
+            table[entry] = next_code
+            next_code += 1
+            if next_code < maxsymbols and (next_code & (next_code - 1)) == 0:
+                symbolsize += 1
+
+    w = b""
+    prev_w = None
+    for byte in data:
+        wc = w + bytes([byte])
+        if wc in table:
+            w = wc
+            continue
+        writer.put(table[w], symbolsize)
+        if prev_w is not None:
+            add(prev_w + w[:1])
+        prev_w = w
+        w = bytes([byte])
+    if w:
+        writer.put(table[w], symbolsize)
+        if prev_w is not None:
+            add(prev_w + w[:1])
+    return writer.flush()
+
+
+def _sqp_record(name, data_len, rsrc_len, data_clen, rsrc_clen, data_off,
+                rsrc_off, type=b"TEXT", creator=b"TTxt", flags16=0x0100,
+                created=400000000, modified=400000100, stored_data=False,
+                stored_rsrc=False):
+    name_bytes = name.encode("mac_roman") if isinstance(name, str) else name
+    rec = bytearray(86)
+    struct.pack_into(">II", rec, 4, rsrc_clen, data_clen)
+    struct.pack_into(">II", rec, 12, data_off, rsrc_off)
+    rec[20:24] = type
+    rec[24:28] = creator
+    struct.pack_into(">H", rec, 28, flags16)
+    rec[36] = len(name_bytes)
+    rec[37:37 + 31] = name_bytes.ljust(31, b"\0")
+    struct.pack_into(">II", rec, 68, created, modified)
+    struct.pack_into(">II", rec, 76, rsrc_len, data_len)
+    flags = 0
+    if stored_data:
+        flags |= 0x02
+    if stored_rsrc:
+        flags |= 0x04
+    rec[84] = flags
+    return bytes(rec)
+
+
+def sqp(entries, version=1):
+    """Build an AppleLink .pkg. ``entries`` is a list of dicts:
+    name, data, rsrc, type, creator, flags16, locked, created, modified,
+    folder, level, stored (bool: store both forks uncompressed)."""
+    member_bytes = bytearray()
+    placed = []
+    cursor = None  # absolute offset where member bytes begin (patched later)
+    for entry in entries:
+        if entry.get("folder"):
+            placed.append((entry, None, None))
+            continue
+        data = entry.get("data", b"")
+        rsrc = entry.get("rsrc", b"")
+        stored = entry.get("stored", False)
+        if stored:
+            dcomp, rcomp = data, rsrc
+        else:
+            dcomp, rcomp = lzw_compress(data), lzw_compress(rsrc)
+        placed.append((entry, len(member_bytes), len(member_bytes) + len(dcomp)))
+        member_bytes += dcomp + rcomp
+    if version == 0:
+        sqp_count = len(placed)
+        base = 10 + 86 * sqp_count
+        hfs_header = b""
+    else:
+        sqp_count = len(placed)
+        base = 10 + 86 * sqp_count
+        hfs_header = struct.pack(">I", len(placed)) + b"\0" * 8
+        base = 10 + 86 * sqp_count + 12 + 90 * len(placed)
+    member_base = base
+    records = []
+    hfs_records = []
+    for entry, data_rel, rsrc_rel in placed:
+        if entry.get("folder"):
+            name = entry.get("name", b"Folder")
+            level = entry.get("level", 1)
+            rec = _sqp_record(name, 0, 0, 0, 0, 0, 0,
+                              type=b"HBSF", creator=b"MACS",
+                              flags16=entry.get("flags16", 0),
+                              created=entry.get("created", 400000000),
+                              modified=entry.get("modified", 400000100))
+            records.append(b"\0" * 86)
+            hfs_records.append(struct.pack(">HH", level, 1) + rec)
+            continue
+        data = entry.get("data", b"")
+        rsrc = entry.get("rsrc", b"")
+        stored = entry.get("stored", False)
+        if stored:
+            dcomp, rcomp = data, rsrc
+        else:
+            dcomp, rcomp = lzw_compress(data), lzw_compress(rsrc)
+        doff = member_base + data_rel
+        roff = member_base + rsrc_rel
+        level = entry.get("level", 1)
+        rec = _sqp_record(entry.get("name", b"File"), len(data), len(rsrc),
+                          len(dcomp), len(rcomp), doff, roff,
+                          type=entry.get("type", b"TEXT"),
+                          creator=entry.get("creator", b"TTxt"),
+                          flags16=entry.get("flags16", 0x0100),
+                          created=entry.get("created", 400000000),
+                          modified=entry.get("modified", 400000100),
+                          stored_data=stored, stored_rsrc=stored)
+        records.append(rec)
+        hfs_records.append(struct.pack(">HH", level, 0) + rec)
+    out = bytearray()
+    out += bytes([sqp_count, version]) + b"\0" * 8
+    for rec in records:
+        out += rec
+    if version == 1:
+        out += hfs_header
+        for rec in hfs_records:
+            out += rec
+    out += member_bytes
+    return bytes(out)
