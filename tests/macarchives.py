@@ -1596,3 +1596,460 @@ def _four(code):
     if isinstance(code, str):
         code = code.encode("ascii")
     return (code + b"????")[:4]
+
+
+# ================================================================== #
+# DiskDoubler fixtures                                               #
+# ================================================================== #
+
+def dd_delta_encode(payload):
+    """Inverse of the running-sum transform: prefix-xor differences."""
+    out = bytearray()
+    prev = 0
+    for byte in payload:
+        out.append((byte - prev) & 0xFF)
+        prev = byte
+    return bytes(out)
+
+
+def dd_sum16(payload, adj=0):
+    return (sum(payload) + adj) & 0xFFFF
+
+
+def dd_xsum(payload, even_complement=False):
+    value = 0
+    for byte in payload:
+        value ^= byte
+    if even_complement and (len(payload) & 1) == 0:
+        value ^= 0xFF
+    return value
+
+
+def _contains(tree, node, target):
+    if node >= 256:
+        return node == target
+    return (_contains(tree, tree.left[node], target)
+            or _contains(tree, tree.right[node], target))
+
+
+def dd_splay_encode(payload, ntrees=256):
+    """Jones splay-tree codes, one tree per context, MSB-first, zero-padded
+    to whole bytes.  Test-side counterpart of the method 2/5 decoders."""
+    from macextract.formats.dd import _SplayTree
+    if ntrees & (ntrees - 1):
+        raise ValueError("ntrees must be a power of two")
+    mask = ntrees - 1
+    trees = [None] * ntrees
+    writer = MsbBitWriter()
+    ctx = 0
+    for byte in payload:
+        tree = trees[ctx]
+        if tree is None:
+            tree = _SplayTree()
+            trees[ctx] = tree
+        target = 256 + byte
+        node = 1
+        path = []
+        while node < 256:
+            if _contains(tree, tree.left[node], target):
+                path.append(0)
+                node = tree.left[node]
+            else:
+                path.append(1)
+                node = tree.right[node]
+        for bit in path:
+            writer.bit(bit)
+        tree.splay(target)
+        ctx = byte & mask
+    return writer.to_bytes()
+
+
+def _dd_ad_block(compsize, uncompsize, flags):
+    raw = compsize.to_bytes(2, "big") + uncompsize.to_bytes(2, "big")
+    rest = b"\0" * 5 + bytes([flags]) + b"\0"   # 4 reserved + data xor, flags, byte 10
+    head11 = raw + rest                            # 11 bytes
+    check = 0
+    for b in head11:
+        check ^= b
+    return head11 + bytes([check])
+
+
+def dd_ad_encode(payload, stored=False):
+    """Methods 6/9: one 12-byte-headed block per 1024 payload bytes,
+    literal-only (or stored with stored=True).  Headers XOR to zero."""
+    out = bytearray()
+    pos = 0
+    while pos < len(payload):
+        chunk = payload[pos:pos + 1024]
+        pos += len(chunk)
+        uncomp = len(chunk)
+        if stored:
+            comp = chunk
+            flags = 1
+            out += _dd_ad_block(uncomp, uncomp, flags) + comp
+            continue
+        writer = MsbBitWriter()
+        for b in chunk:
+            writer.bit(0)
+            writer.bits(b, 8)
+        coded = writer.to_bytes()
+        out += _dd_ad_block(len(coded), uncomp, 0) + coded
+    return bytes(out)
+
+
+def dd_stac_encode(payload):
+    """Method 7: literal-only chunks, complemented MSB-first stream,
+    18-byte header with an empty chunk table."""
+    writer = MsbBitWriter()
+    for b in payload:
+        writer.bit(1)          # raw bit 1 -> dd_lzs(1) reads 0: a literal
+        writer.bits(b, 8)      # decoder XORs 0xff back itself
+    body = writer.to_bytes()
+    return b"\0" * 6 + (0).to_bytes(4, "big") + b"\0" * 8 + body
+
+
+def dd_ddn_encode(payload):
+    """Method 10: a single literal-only block.  Raw literal stream
+    (flags 0), one-symbol canonical codes (length 1) for offsets and
+    lengths, all literal symbols code 0.  Bytes are the fork's
+    decompressed bytes — apply dd_delta_encode first for the delta
+    form."""
+    numliterals = len(payload)
+    uncompsize = numliterals
+    head = (0 << 24) | (1 << 13) | (1 << 8) | (1 << 3)   # numcodes 1, numbytes 1, maxlength 1, numbits 1
+    code_section = head.to_bytes(4, "big") + b"\x80"     # one length: 1 bit + pad
+
+    offsetcompsize = len(code_section)                   # no offset symbols
+    literalcompsize = numliterals                        # raw bytes
+    length_bits = (numliterals + 7) // 8
+    lengthcompsize = len(code_section) + length_bits
+
+    length_data = b"\0" * length_bits
+
+    header = bytearray()
+    header += uncompsize.to_bytes(4, "big")
+    header += numliterals.to_bytes(2, "big")
+    header += (0).to_bytes(2, "big")                     # numoffsets
+    header += lengthcompsize.to_bytes(2, "big")
+    header += literalcompsize.to_bytes(2, "big")
+    header += offsetcompsize.to_bytes(2, "big")
+    header += b"\0"                                     # flags
+    header += b"\0" * 6                                 # pad
+    check = 0
+    for b in header:
+        check ^= b
+    header.append(check)
+
+    return bytes(header) + code_section + payload + code_section + length_data
+
+
+def _dd_encode_fork(payload, method, delta=False, garble=False,
+                    count=0, lzh=False):
+    """One fork's stored bytes and stored checksum.
+
+    ``payload`` is the DECOMPRESSED bytes.  ``delta`` applies the
+    running-sum difference transform outside the coder.  ``garble``
+    applies the 0x5a obfuscation to methods 1, 2 and 5 only.  Method 5
+    writes a context-count byte (0 meaning 256).  Method 8 picks the
+    RLE branch unless ``lzh`` is set.  Returns (fork_bytes, crc16);
+    methods carrying per-block checks store 0."""
+    p = dd_delta_encode(payload) if delta else payload
+    xored = garble and method in (1, 2, 5)
+    code_input = bytes(b ^ 0x5A for b in p) if xored else p
+    if method == 0:
+        fork = bytearray(p)
+        crc = dd_sum16(p)
+    elif method == 1:
+        flags = 0x80 | 13
+        header = b"\x1f\x9d" + bytes([flags])
+        stored = bytes(b ^ 0x5A for b in header) if garble else header
+        fork = bytearray(stored)
+        fork += lzw_compress(code_input, maxbits=13, blockmode=True)
+        crc = dd_sum16(p, 0x1F + 0x9D + flags)
+    elif method == 2:
+        fork = bytearray(dd_splay_encode(code_input, 256))
+        crc = dd_sum16(p)
+    elif method == 5:
+        ntrees = 256 if count == 0 else count
+        if ntrees & (ntrees - 1):
+            ntrees = 1      # an invalid count is refused before the stream
+        fork = bytearray([count])          # 0 means 256
+        fork += dd_splay_encode(code_input, ntrees)
+        crc = dd_sum16(p)
+    elif method == 3:
+        fork = bytearray(rle90_encode(p))
+        crc = dd_sum16(p)
+    elif method == 4:
+        fork = bytearray(huffman_encode(p)) if p else bytearray()
+        crc = dd_sum16(p)
+    elif method in (6, 9):
+        fork = bytearray(dd_ad_encode(p))
+        crc = 0
+    elif method == 7:
+        fork = bytearray(dd_stac_encode(p))
+        crc = dd_xsum(p, (len(p) & 1) == 0)
+    elif method == 8:
+        body = cpt_fork(p, lzh=lzh)
+        prefix = b"\0" * 16 if lzh else b"\0" * 15 + b"\x01"
+        fork = bytearray(prefix) + body
+        crc = crc16_arc(p)
+    elif method == 10:
+        fork = bytearray(dd_ddn_encode(p))
+        crc = 0
+    else:
+        raise ValueError("no fixture encoder for method %d" % method)
+    return bytes(fork), crc
+
+
+def _dd_header80(f):
+    """The 80 bytes after the magic, from a field dict."""
+    h = bytearray(80)
+    struct.pack_into(">IIII", h, 0, f["datasize"], f["datacomp"],
+                     f["rsrcsize"], f["rsrccomp"])
+    h[16] = f["datamethod"] & 0xFF
+    h[17] = f["rsrcmethod"] & 0xFF
+    h[18] = f["info1"]
+    struct.pack_into(">II", h, 20, f["modification"], f["creation"])
+    h[28:32] = f["type"]
+    h[32:36] = f["creator"]
+    struct.pack_into(">H", h, 36, f["finderflags"])
+    struct.pack_into(">H", h, 44, f["datacrc"] & 0xFFFF)
+    struct.pack_into(">H", h, 46, f["rsrccrc"] & 0xFFFF)
+    h[48] = f["info2"]
+    struct.pack_into(">HH", h, 50, f["datadelta"], f["rsrcdelta"])
+    return bytes(h)
+
+
+def _dd_fields(data, rsrc, data_method, rsrc_method, delta, garble,
+               lzh, count):
+    """Encode both forks and return the field dict + payload bytes."""
+    xdata, xrsrc = ((delta, delta) if isinstance(delta, bool) else delta)
+    xored = garble and any(
+        (m & 0x7F) in (1, 2, 5) for m in (data_method, rsrc_method))
+    info1 = 0x2A if xored else 0x1F
+    enc_d, crc_d = _dd_encode_fork(data, data_method & 0x7F,
+                                   xdata and len(data) > 0, garble,
+                                   count, lzh)
+    enc_r, crc_r = _dd_encode_fork(rsrc, rsrc_method & 0x7F,
+                                   xrsrc and len(rsrc) > 0, garble,
+                                   count, lzh)
+    f = {
+        "datasize": len(data), "datacomp": len(enc_d),
+        "rsrcsize": len(rsrc), "rsrccomp": len(enc_r),
+        "datamethod": (data_method & 0x7F) | (0x80 if xdata and len(data) else 0),
+        "rsrcmethod": (rsrc_method & 0x7F) | (0x80 if xrsrc and len(rsrc) else 0),
+        "info1": info1, "info2": 0x00,
+        "modification": 0xC9C00000, "creation": 0xC9C00000,
+        "type": b"TEXT", "creator": b"TLst", "finderflags": 0,
+        "datacrc": crc_d, "rsrccrc": crc_r,
+        "datadelta": 1 if xdata and len(data) else 0,
+        "rsrcdelta": 1 if xrsrc and len(rsrc) else 0,
+    }
+    return f, enc_d, enc_r
+
+
+def dd_single(name=b"TestFile", data=b"hello world", rsrc=b"",
+              data_method=0, rsrc_method=0, delta=False, garble=False,
+              variant=84, trailer=True, count=0, lzh=False,
+              type=b"TEXT", creator=b"TLst", flags=0):
+    """A single DiskDoubler-compressed file (0xABCD0054, or 0xABCD0030
+    for the 1990 48-byte header).  Returns the image bytes; the host
+    filename supplies the entry's name minus a .dd suffix."""
+    xored = garble and any(
+        (m & 0x7F) in (1, 2, 5) for m in (data_method, rsrc_method))
+    if variant == 48:
+        f, enc_d, enc_r = _dd_fields(data, rsrc, data_method,
+                                     rsrc_method, (False, False),
+                                     False, lzh, count)
+        f["datadelta"] = f["rsrcdelta"] = 0
+        body = _dd_header80(f)[:44]
+        image = bytearray(b"\xAB\xCD\x00\x30" + body)
+        image += enc_d + enc_r
+        return bytes(image)
+    f, enc_d, enc_r = _dd_fields(data, rsrc, data_method, rsrc_method,
+                                 delta, garble, lzh, count)
+    f["type"] = type
+    f["creator"] = creator
+    f["finderflags"] = flags
+    body = _dd_header80(f)
+    head = b"\xAB\xCD\x00\x54" + body
+    image = bytearray(head)
+    image += enc_d + enc_r
+    if trailer:
+        image += head
+    return bytes(image)
+
+
+def _dd_ddar_record(name, *, isdir=0, enddir=0, span=0, rsrcsize=0,
+                    created=0xC9C00000, modified=0xC9C00000,
+                    type=b"DDAP", creator=b"DDAP", flags=0,
+                    location=b"\0" * 4, datacrc=0, rsrccrc=0):
+    rec = bytearray(124)
+    rec[0:4] = b"DDAR"
+    enc = name.encode("mac_roman")[:63] if isinstance(name, str) else name[:63]
+    rec[8] = len(enc)
+    rec[9:9 + len(enc)] = enc
+    rec[72] = isdir
+    rec[73] = enddir
+    struct.pack_into(">II", rec, 74, span, rsrcsize)
+    struct.pack_into(">II", rec, 82, created, modified)
+    rec[90:94] = type
+    rec[94:98] = creator
+    struct.pack_into(">H", rec, 98, flags)
+    rec[100:104] = location
+    struct.pack_into(">HH", rec, 118, datacrc & 0xFFFF, rsrccrc & 0xFFFF)
+    return bytes(rec)
+
+
+def ddar(entries, trailer=True, created=0xC9C00000, modified=0xC9C00000):
+    """A 'DDAR' archive.  ``entries`` is a list of dicts with keys
+    ``path`` ('/'-separated), ``data``, ``rsrc``, and optionally
+    ``type``, ``creator``, ``flags``, ``method``, ``rsrc_method``,
+    ``delta``, ``garble``, ``raw``, ``count``, ``lzh``.  Folders are
+    derived from the paths; entries order = record order."""
+    out = bytearray(b"DDAR" + b"\0" * 74)
+    open_dirs = []
+
+    def folder_records(depth):
+        while len(open_dirs) > depth:
+            name = open_dirs.pop()
+            out.extend(_dd_ddar_record(name, isdir=1, enddir=1,
+                                       created=created,
+                                       modified=modified))
+
+    for entry in entries:
+        parts = entry["path"].split("/")
+        dirs, leaf = parts[:-1], parts[-1]
+        for i, d in enumerate(dirs):
+            if i < len(open_dirs) and open_dirs[i] == d:
+                continue
+            folder_records(i)
+            open_dirs.append(d)
+            out += _dd_ddar_record(d, isdir=1,
+                                   created=created, modified=modified)
+        folder_records(len(dirs))
+
+        data = entry["data"]
+        rsrc = entry.get("rsrc", b"")
+        if entry.get("raw"):
+            rec = _dd_ddar_record(
+                leaf, span=len(data), rsrcsize=len(rsrc),
+                created=created, modified=modified,
+                type=entry.get("type", b"TEXT"),
+                creator=entry.get("creator", b"TLst"),
+                flags=entry.get("flags", 0),
+                datacrc=dd_sum16(data), rsrccrc=dd_sum16(rsrc))
+            out += rec + data + rsrc
+            continue
+
+        method = entry.get("method", 0)
+        rmethod = entry.get("rsrc_method", method)
+        delta = entry.get("delta", False)
+        garble = entry.get("garble", False)
+        f, enc_d, enc_r = _dd_fields(data, rsrc, method, rmethod,
+                                     delta, garble,
+                                     entry.get("lzh", False),
+                                     entry.get("count", 0))
+        f["type"] = entry.get("type", b"TEXT")
+        f["creator"] = entry.get("creator", b"TLst")
+        f["finderflags"] = entry.get("flags", 0)
+        f["creation"] = created
+        f["modification"] = modified
+        head = b"\xAB\xCD\x00\x54" + _dd_header80(f)
+        inner = len(head) + len(enc_d) + len(enc_r)
+        trailer_bytes = head if trailer else b""
+        span = inner + len(trailer_bytes)
+        rec = _dd_ddar_record(
+            leaf, span=span, rsrcsize=0,
+            created=created, modified=modified,
+            type=b"APPL", creator=b"DDAP", flags=0)
+        out += rec + head + enc_d + enc_r + trailer_bytes
+    folder_records(0)
+    return bytes(out)
+
+
+def dda2(entries, trailer=True, created=0xC9C00000,
+         modified=0xC9C00000, markerless=False, junk_end=0):
+    """A 'DDA2' archive.  Same entry dicts as ``ddar``.  ``markerless``
+    omits the 0xBBBB end record; ``junk_end`` appends that many zero
+    bytes after the last record in either case."""
+    out = bytearray(b"DDA2" + b"\0" * 58)
+    open_dirs = []
+    folder_number = 2
+
+    def drain(depth):
+        while len(open_dirs) > depth:
+            open_dirs.pop()
+
+    for entry in entries:
+        parts = entry["path"].split("/")
+        dirs, leaf = parts[:-1], parts[-1]
+        for i, d in enumerate(dirs):
+            if i < len(open_dirs) and open_dirs[i] == d:
+                continue
+            drain(i)
+            enc = d.encode("mac_roman")[:31]
+            rec = bytearray(88)
+            rec[0:4] = b"DDA2"
+            struct.pack_into(">H", rec, 4, 0x8000)
+            rec[6] = len(enc)
+            rec[7:7 + len(enc)] = enc
+            struct.pack_into(">II", rec, 38, i + 2, 88)
+            struct.pack_into(">II", rec, 54, created, modified)
+            struct.pack_into(">I", rec, 62, folder_number)
+            folder_number += 1
+            out += rec
+            open_dirs.append(d)
+        drain(len(dirs))
+
+        data = entry["data"]
+        rsrc = entry.get("rsrc", b"")
+        leaf_enc = leaf.encode("mac_roman")[:31]
+        depth = len(dirs) + 2
+
+        if entry.get("raw"):
+            total = 90 + len(data) + len(rsrc)
+            rec = bytearray(90)
+            rec[0:4] = b"DDA2"
+            struct.pack_into(">H", rec, 4, 0x1000)
+            rec[6] = len(leaf_enc)
+            rec[7:7 + len(leaf_enc)] = leaf_enc
+            struct.pack_into(">II", rec, 38, depth, total)
+            struct.pack_into(">II", rec, 54, created, modified)
+            rec[62:66] = entry.get("type", b"TEXT")
+            rec[66:70] = entry.get("creator", b"TLst")
+            struct.pack_into(">H", rec, 70, entry.get("flags", 0))
+            struct.pack_into(">II", rec, 78, len(data), len(rsrc))
+            rec[86] = dd_xsum(data)
+            rec[87] = dd_xsum(rsrc)
+            out += rec + data + rsrc
+            continue
+
+        method = entry.get("method", 0)
+        rmethod = entry.get("rsrc_method", method)
+        delta = entry.get("delta", False)
+        garble = entry.get("garble", False)
+        f, enc_d, enc_r = _dd_fields(data, rsrc, method, rmethod,
+                                     delta, garble,
+                                     entry.get("lzh", False),
+                                     entry.get("count", 0))
+        f["type"] = entry.get("type", b"TEXT")
+        f["creator"] = entry.get("creator", b"TLst")
+        f["finderflags"] = entry.get("flags", 0)
+        f["creation"] = created
+        f["modification"] = modified
+        head = b"\xAB\xCD\x00\x54" + _dd_header80(f)
+        trailer_bytes = head if trailer else b""
+        total = 56 + len(head) + len(enc_d) + len(enc_r) + len(trailer_bytes)
+        rec = bytearray(56)
+        rec[0:4] = b"DDA2"
+        struct.pack_into(">H", rec, 4, 0x0000)
+        rec[6] = len(leaf_enc)
+        rec[7:7 + len(leaf_enc)] = leaf_enc
+        struct.pack_into(">II", rec, 38, depth, total)
+        out += rec + head + enc_d + enc_r + trailer_bytes
+    if not markerless:
+        out += b"DDA2" + struct.pack(">H", 0xBBBB)
+    if junk_end:
+        out += b"\0" * junk_end
+    return bytes(out)

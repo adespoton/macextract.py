@@ -237,13 +237,14 @@ def _sym(bits, table):
     raise CorruptError("Compact Pro: no Huffman code matches the stream")
 
 
-def lzh_decode(stored, length):
+def lzh_decode(stored, length, block=BLOCK):
     """One LZH fork: the LZSS loop over an 8 KB window, its block
     accounting (2 per literal, 3 per match, block at or past
-    0x1fff0) and its flush rule (align, then skip three bytes if an
-    odd number was consumed since the block's data began, else two),
-    each byte fed through the run filter — which is what the header's
-    length counts."""
+    ``0x1fff0`` unless overridden) and its flush rule (align, then
+    skip three bytes if an odd number was consumed since the block's
+    data began, else two), each byte fed through the run filter —
+    which is what the header's length counts.  DiskDoubler method 8
+    uses the same coder with a 0xfff0 block."""
     if length == 0:
         return b""
     win = bytearray(WINDOW)
@@ -265,7 +266,7 @@ def lzh_decode(stored, length):
         bs = _Bits(stored, p)
         blockstart = p
         cost = 0
-        while cost < BLOCK and not rle.full():
+        while cost < block and not rle.full():
             if bs.bit():
                 v = _sym(bs, tlit)
                 win[wpos & (WINDOW - 1)] = v

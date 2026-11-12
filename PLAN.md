@@ -93,7 +93,33 @@ begins.
     Volume numbers other than 1 and segmented sets are refused by
     name.  38 tests, generated data only.
 
-Later batches (each with tests): DiskDoubler → Now Compress →
+13. [x] DiskDoubler (`.dd`, `.ddar`, `.dda2`) — three containers over
+    one fork codec.  Single-file images (0xABCD0054; the 1990 variant
+    0xABCD0030, 48 bytes, never garbled, absent checksums read as
+    zero), ``DDAR`` (78-byte header, 124-byte records, folders derived
+    from path components with a closing record that is a byte copy of
+    the folder record with byte 73 set, tested before the record is
+    treated as an entry) and ``DDA2`` (62-byte header, variable-length
+    records each stating their own size, ``0xBBBB`` end record or a
+    markerless ending within 46 bytes of the declared end).  Folders
+    rebuilt from the depth fields: DDA2's depth at +38 is the number of
+    enclosing folders plus 2 for files and folders alike, and a folder
+    record states the depth its contents will use; DDAR's closing
+    copy is tested first.  All ten methods round-trip (0 stored,
+    1 LZW with the ``1f 9d`` header, 2 and 5 splay-tree with shared or
+    per-context trees, 3 RLE-90, 4 Huffman, 6 and 9 AD, 7 STAC,
+    8 Compact Pro's LZH/RLE with the 16-byte prefix and CRC-16/ARC,
+    10 DDn with two canonical Huffman codes and the offset-slot table,
+    MSB-first).  The 0x5a header garble applies to methods 1, 2 and 5
+    only, as in the C project; the delta form (distance 1) sits outside
+    every coder and is checked before the checksum, which sums the
+    pre-delta bytes.  Stored checksums for methods 6, 7, 9 and 10 are
+    per-block XORs, and method 7 also pins a one-byte XOR of the
+    fork; methods 1–5 carry a 16-bit sum with the header trio folded in
+    for method 1.  Finder info carried for single-file images and DDAR
+    records.  60 tests, generated data only.
+
+Later batches (each with tests): Now Compress →
 MacCompress (.Z) → ARC → LZH/LHA → PackIt splits → DiskDoubler/StuffIt
 split volumes → MAR → Apple Backup → Tomes → zip/gzip/tar → StuffIt
 SpaceSaver (with Aladdin tables, attribution per NOTICE). StuffIt X never. PC formats (RAR, 7z,

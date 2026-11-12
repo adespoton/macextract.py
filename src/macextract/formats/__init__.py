@@ -7,9 +7,9 @@
 """
 
 from . import (
-    applesingle, binhex, b64, btoa, cpt, macbinary, mime, packit, sit, sit5,
-    sqp, uuencode,
+    applesingle, binhex, b64, btoa, cpt, dd, macbinary, mime, packit, sit,
+    sit5, sqp, uuencode,
 )
 
 FORMATS = [macbinary, binhex, applesingle, uuencode, btoa, b64, mime, packit,
-           sit, sit5, sqp, cpt]
+           sit, sit5, sqp, cpt, dd]

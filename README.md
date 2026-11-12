@@ -47,11 +47,12 @@ listed under *Supported* is not supported yet. See
 | StuffIt classic | `.sit` | methods 0/1/2/3/13/15 (stored, RLE-90, LZW-14, Huffman, LZ+Huffman, Arsenic), folders, CRC-16 checks; other methods, encryption and optimizer modules refused by name |
 | StuffIt 5 | `.sit` (banner) | folders with parent-offset paths, UTF-8 names, Finder-info gate, comments, entry versions 1 and 3; methods 0/1/2/3/13/15 (Arsenic); encrypted archives via `password=` (MD5 grade, RC4 forks); method 14 refused by name |
 | Compact Pro | `.cpt` | folders rebuilt from the directory-count scheme, comments, RLE and LZH (LZSS + canonical Huffman) forks; encrypted archives via `password=` (its CRC-table cipher); segmented sets refused by name |
+| DiskDoubler | `.dd`, `.ddar`, `.dda2` | single-file (84-byte header and the 1990 48-byte variant), DDAR and DDA2 containers, folders rebuilt from the path records, all ten methods (stored, LZW, RLE-90, Huffman, splay-tree, AD, STAC, Compact Pro's LZH/RLE round, DDn with its canonical Huffman codes), the delta form (distance 1 only; other distances refused by name), the 0x5a header garble honoured for methods 1/2/5, Finder info carried; DDAR closing records and markerless DDA2 endings tolerated |
 
 ## Not supported (yet)
 
 StuffIt X, StuffIt classic's methods 5/6/7/8/14, StuffIt 5's
-method 14 (code-only, no spec), DiskDoubler, MacCompress, Now
+method 14 (code-only, no spec), MacCompress, Now
 Compress, StuffIt SpaceSaver, Alysis SuperDisk!, Private File, ARC, LZH/LHA, MAR, Apple
 Backup, Tomes, zip/gzip/tar/.Z, RAR, 7-Zip, bzip2, xz, and PC formats.
 StuffIt X and every other PC/modern format are out of scope, same as
