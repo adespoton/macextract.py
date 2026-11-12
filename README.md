@@ -12,6 +12,10 @@ The import package is `macextract`:
 
     pip install git+https://github.com/adespoton/macextract.py
 
+Classetta (the Classic Mac emulation front end) depends on
+macextract.py; its Filer browses, extracts and launches archives, and
+inherits every registered format automatically.
+
 Pure standard library, no dependencies. Read-only.
 
 ```python

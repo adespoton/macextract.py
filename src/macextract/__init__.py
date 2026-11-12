@@ -53,8 +53,14 @@ def open(file, password=None):  # noqa: A001 - mirrors builtin open, deliberatel
         with builtins.open(filename, "rb") as handle:
             data = handle.read()
 
+    def _score(module):
+        try:
+            return module.probe(data)
+        except Exception:
+            return 0
+
     scored = sorted(
-        ((module.probe(data), module) for module in formats.FORMATS),
+        ((_score(module), module) for module in formats.FORMATS),
         key=lambda item: -item[0],
     )
     candidates = [(score, module) for score, module in scored if score > 0]
@@ -68,6 +74,14 @@ def open(file, password=None):  # noqa: A001 - mirrors builtin open, deliberatel
         except CorruptError as error:
             if first_error is None:
                 first_error = error
+            continue
+        except MacExtractError:
+            raise
+        except Exception as error:
+            # Parsers are trusted to raise CorruptError; a bug must not
+            # leak out as one.
+            if first_error is None:
+                first_error = CorruptError("%s: %s" % (module.NAME if hasattr(module, "NAME") else module.__name__.rsplit(".", 1)[-1], error))
             continue
         _pair_appledouble_sibling(archive, filename)
         return archive

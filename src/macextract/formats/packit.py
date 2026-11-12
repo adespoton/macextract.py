@@ -49,6 +49,8 @@ TAIL_CRC_SIZE = 2
 
 
 def _parse_header(buf, offset=0):
+    if len(buf) < offset + HEADER_SIZE:
+        raise CorruptError("PackIt: cut short in the header")
     name_len = buf[offset]
     if not 1 <= name_len <= 63:
         raise CorruptError("PackIt: name length %d out of range" % name_len)
