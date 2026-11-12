@@ -6,6 +6,6 @@
   CorruptError / PasswordRequiredError / UnsupportedError.
 """
 
-from . import applesingle, binhex, btoa, macbinary, uuencode
+from . import applesingle, binhex, b64, btoa, macbinary, mime, uuencode
 
-FORMATS = [macbinary, binhex, applesingle, uuencode, btoa]
+FORMATS = [macbinary, binhex, applesingle, uuencode, btoa, b64, mime]

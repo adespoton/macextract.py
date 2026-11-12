@@ -24,12 +24,16 @@ listed under *Supported* is not supported yet. See
 | MacBinary I/II/III | `.bin` | `.macbin` also accepted |
 | BinHex 4 | `.hqx` (also `.hex`, `.hcx`) | BinHex 3/2 refused with a clear error |
 | AppleSingle / AppleDouble | `.as`, `.bin` (v1), `.ad`, `._foo` | RFC 1740 |
+| uuencode | `.uu`, `.uue` | single files, plus Apple MU multi-fork streams |
+| btoa | `.btoa` | btoa 4 and 5.2.1 |
+| base64 | `.b64` (also `begin-base64` shape) | RFC 2045, lenient decoder |
+| MIME attachments | `.eml` | multipart/*, appledouble pairs, pasted uuencode |
 
 ## Not supported (yet)
 
 StuffIt classic/5/X, Compact Pro, DiskDoubler, MacCompress, Now
 Compress, StuffIt SpaceSaver, Alysis SuperDisk!, Private File, PackIt,
-AppleLink, ARC, LZH/LHA, uuencode, btoa, base64/MIME, MAR, Apple
+AppleLink, ARC, LZH/LHA, MAR, Apple
 Backup, Tomes, zip/gzip/tar/.Z, RAR, 7-Zip, bzip2, xz, and PC formats.
 StuffIt X and every other PC/modern format are out of scope, same as
 the C project.

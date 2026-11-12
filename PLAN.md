@@ -14,8 +14,9 @@ begins.
    truncated, BinHex 2/3 refusal, RLE edge cases (0x90 runs).
 4. [ ] AppleSingle / AppleDouble (`.as`, `.ad`, `._foo`) — RFC 1740;
    entries 1, 2, 9 at least; tests round-trip.
-5. [ ] uuencode (`.uu`), btoa (`.btoa`), base64/MIME attachments —
-   MU multi-file layouts for uu (data fork, `.rsrc`, `.finfo` sections).
+5. [x] uuencode (`.uu`), btoa (`.btoa`), base64/MIME attachments —
+   done; MU multi-file layouts merged for uu; multipart/appledouble
+   pairs forked entries; pasted uuencode in bodies extracted.
 6. [ ] PackIt (`.pit`) — container + CRC-16/XMODEM verification;
    password-protected entries detected (decrypt unsupported → clear
    error or implement if cipher is simple enough to redo from spec).

@@ -270,3 +270,73 @@ def btoa(name="file.txt", data=b"hello world", newver=True, bad_sum=False):
         eor ^= 0xFF
     lines_out.append("xbtoa End N %d %s E %x S %x R %x" % (len(data), want_hex, eor, total, rot))
     return ("\n".join(lines_out) + "\n").encode("latin-1")
+
+
+import base64 as _b64mod
+
+
+def base64_begin(name="TestFile", data=b"hello world", mode=0o644):
+    encoded = _b64mod.b64encode(data).decode()
+    lines = [encoded[i:i + 76] for i in range(0, len(encoded), 76)]
+    return ("begin-base64 %03o %s\n%s\n====\n" % (mode, name, "\n".join(lines))).encode("ascii")
+
+
+def base64_bare(data=b"hello world"):
+    encoded = _b64mod.b64encode(data).decode()
+    lines = [encoded[i:i + 76] for i in range(0, len(encoded), 76)]
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def mime_message(parts, boundary="Apple-Mail-Boundary",
+                 preamble="This is the message body.\n",
+                 headers=None):
+    if headers is None:
+        headers = ("MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"%s\"\r\n" % boundary)
+    out = [headers.rstrip("\r\n"), ""]
+    if preamble:
+        out.append(preamble.rstrip("\n"))
+    for part in parts:
+        out.append("--" + boundary)
+        out.append(part.get("headers", ""))
+        out.append("")
+        out.append(part["body"])
+    out.append("--" + boundary + "--")
+    return "\r\n".join(out).encode("latin-1")
+
+
+def mime_b64_part(filename, data, ctype="application/octet-stream"):
+    encoded = _b64mod.b64encode(data).decode()
+    lines = [encoded[i:i + 76] for i in range(0, len(encoded), 76)]
+    return {
+        "headers": ("Content-Type: %s; name=\"%s\"\r\n"
+                    "Content-Transfer-Encoding: base64\r\n"
+                    "Content-Disposition: attachment; filename=\"%s\"" % (ctype, filename, filename)),
+        "body": "\r\n".join(lines),
+    }
+
+
+def appledouble_part_headers():
+    return ("Content-Type: application/applefile\r\n"
+            "Content-Transfer-Encoding: base64")
+
+
+def mime_appledouble(name=b"Doc", data=b"data-fork-bytes", rsrc=b"rsrc-bytes",
+                     type=b"TEXT", creator=b"ttxt"):
+    applefile = applesingle(name=name, data=None, rsrc=rsrc,
+                            type=type, creator=creator,
+                            magic=0x00051607)
+    first = {
+        "headers": appledouble_part_headers(),
+        "body": "\r\n".join(_b64mod.b64encode(applefile).decode()[i:i + 76]
+                          for i in range(0, len(_b64mod.b64encode(applefile).decode()), 76)),
+    }
+    second = {
+        "headers": ("Content-Type: application/octet-stream\r\n"
+                    "Content-Transfer-Encoding: base64"),
+        "body": "\r\n".join(_b64mod.b64encode(data).decode()[i:i + 76]
+                          for i in range(0, len(_b64mod.b64encode(data).decode()), 76)),
+    }
+    boundary = "AppleMailBoundary"
+    headers = ("MIME-Version: 1.0\r\n"
+               "Content-Type: multipart/appledouble; boundary=\"%s\"\r\n" % boundary)
+    return mime_message([first, second], boundary=boundary, headers=headers, preamble="")
