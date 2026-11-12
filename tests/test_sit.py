@@ -239,7 +239,7 @@ def test_stored_fork_shorter_than_its_length_is_corrupt():
         _open(bytes(img))
 
 
-@pytest.mark.parametrize("method", [5, 6, 7, 8, 14, 15])
+@pytest.mark.parametrize("method", [5, 6, 7, 8, 14])
 def test_unsupported_methods_name_the_method(method):
     image = macarchives.stuffit([{"name": b"A", "data": b"aaaa"}])
     with pytest.raises(UnsupportedError, match="method %d" % method):

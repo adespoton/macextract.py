@@ -264,7 +264,7 @@ def test_a_key_that_is_not_five_bytes_is_corrupt():
         _open(image, password="pw")
 
 
-@pytest.mark.parametrize("method", [14, 15])
+@pytest.mark.parametrize("method", [14])
 def test_unsupported_methods_name_the_method(method):
     # No encoder for these: the payload stands as stored and the method
     # byte says what it is.
@@ -277,8 +277,8 @@ def test_unsupported_methods_name_the_method(method):
 def test_unsupported_method_on_the_resource_fork():
     image = macarchives.stuffit5(
         [{"name": b"A", "data": b"aaa", "rsrc": b"rr",
-          "rsrc_method": 15}])
-    with pytest.raises(UnsupportedError, match="method 15"):
+          "rsrc_method": 14}])
+    with pytest.raises(UnsupportedError, match="method 14"):
         _open(image)
 
 

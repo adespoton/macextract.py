@@ -59,8 +59,8 @@ folder records its own header offset, children name it at offset 26.
 
 Fork CRCs are CRC-16/ARC — the parent project's behavior on real
 archives, same as StuffIt classic's; the wiki's CCITT claim disagrees
-with it.  Methods 0, 1, 2, 3 and 13 decode (the classic codecs);
-method 15 (Arsenic) and 14 and the rest are refused by name.
+with it.  Methods 0, 1, 2, 3, 13 and 15 (Arsenic) decode;
+method 14 and the rest are refused by name.
 
 Encryption is per entry (flag 0x20): each keyed fork is RC4 under
 ``MD5(password)[:5]`` plus the fork's own five clear key bytes, with
@@ -74,6 +74,7 @@ import hashlib
 import struct
 
 from .._core import Archive, Entry
+from .._arsenic import arsenic_decode
 from .._crc16 import crc16_arc
 from .._huffman import decode as _huffman_decode
 from .._lzw import lzw_decompress
@@ -141,6 +142,8 @@ def _decode_fork(method, stored, length, name, label):
         return _huffman_decode(stored, length)[0]
     if method == 13:
         return sit13_decode(stored, length)
+    if method == 15:
+        return arsenic_decode(stored, length)
     raise UnsupportedError(
         "StuffIt 5: method %d compression is not supported" % method)
 
@@ -153,7 +156,9 @@ def _read_fork(data, offset, stored_len, method, length, want_crc, key,
     if key:
         stored = rc4(stored, key)
     decoded = _decode_fork(method, stored, length, name, label)
-    if crc16_arc(decoded) != want_crc:
+    # Method 15 carries its own CRC-32, checked inside the decoder; the
+    # header's CRC-16 field means nothing for it (it is set to zero).
+    if (method & 0x0F) != 15 and crc16_arc(decoded) != want_crc:
         raise CorruptError(
             "StuffIt 5: %s fork CRC mismatch for %r" % (label, name))
     return decoded

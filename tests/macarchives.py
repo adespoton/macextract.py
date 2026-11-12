@@ -7,8 +7,10 @@ weird corners the tests exercise.
 
 import hashlib
 import struct
+import zlib
 
 from macextract import _sit13
+from macextract._arsenic import HALF, MODELS, ONE, RNDTABLE, Model
 from macextract._crc16 import crc16_arc, crc16_ccitt
 from macextract._rc4 import rc4
 
@@ -753,6 +755,10 @@ def _sit_compress(method, payload, spec):
     if method == 13:
         return sit13_encode(payload, selector=spec.get("selector"),
                             f_bit=spec.get("f_bit", False))
+    if method == 15:
+        return arsenic_encode(payload,
+                              blockbits=spec.get("arsenic_blockbits", 9),
+                              randomized=spec.get("arsenic_randomized", False))
     raise ValueError("stuffit: no encoder for method %d" % method)
 
 
@@ -890,7 +896,7 @@ def _s5_name(name):
 
 
 def _sit5_compress(method, payload, spec):
-    if method in (0, 1, 2, 3, 13):
+    if method in (0, 1, 2, 3, 13, 15):
         return _sit_compress(method, payload, spec)
     # No encoder for the rest: the bytes stand as stored and the method
     # byte says what they are, which the reader must refuse by name.
@@ -1066,8 +1072,10 @@ def stuffit5(files=(), password=None, blocks14=False, comment_block=False,
             if rsrc:
                 rstored = rc4(rstored, akey + rkey)
 
-        datacrc = crc16_arc(data)
-        rsrccrc = crc16_arc(rsrc)
+        # The wiki: a fork compressed with method 15 stores zero in
+        # its CRC-16 field — the stream checks itself.
+        datacrc = 0 if dmethod == 15 else crc16_arc(data)
+        rsrccrc = 0 if rmethod == 15 else crc16_arc(rsrc)
         if spec.get("bad_data_crc"):
             datacrc ^= 0xFFFF
         if spec.get("bad_rsrc_crc"):
@@ -1126,4 +1134,214 @@ def stuffit5(files=(), password=None, blocks14=False, comment_block=False,
     first = struct.unpack_from(">I", out, 94)[0]
     if bad_id and first + 4 <= len(out):
         out[first:first + 4] = b"\0\0\0\0"
+    return bytes(out)
+
+
+# --- StuffIt method 15, Arsenic --------------------------------------
+
+def _ars_rle_tokens(payload):
+    """The spec's byte-stuffing RLE, cut into tokens the block packer
+    must never split: a run of 4..255 becomes four copies plus a count
+    byte (the run length minus four), runs longer than 255 become a
+    run of 255 and the rest, shorter runs stay literal bytes."""
+    tokens = []
+    i = 0
+    n = len(payload)
+    while i < n:
+        j = i
+        while j < n and payload[j] == payload[i] and j - i < 255:
+            j += 1
+        run = j - i
+        if run >= 4:
+            tokens.append(bytes([payload[i]]) * 4 + bytes([run - 4]))
+        else:
+            tokens.extend(bytes([b]) for b in payload[i:j])
+        i = j
+    return tokens
+
+
+def _ars_pack_blocks(tokens, blocksize):
+    blocks = []
+    current = []
+    size = 0
+    for token in tokens:
+        if size + len(token) > blocksize:
+            blocks.append(b"".join(current))
+            current = []
+            size = 0
+        current.append(token)
+        size += len(token)
+    if current:
+        blocks.append(b"".join(current))
+    return blocks
+
+
+def _ars_randomize(data):
+    rndindex = 0
+    pos = RNDTABLE[0]
+    n = len(data)
+    while pos < n:
+        data[pos] ^= 1
+        rndindex = (rndindex + 1) & 0xFF
+        pos += RNDTABLE[rndindex]
+
+
+def _ars_forward_bwt(block):
+    """The wrapping BWT: sort the rotations (stable, so equal ones stay
+    in start-index order), take the preceding byte as the L column and
+    the original rotation's rank as the primary index."""
+    n = len(block)
+    order = sorted(range(n), key=lambda s: block[s:] + block[:s])
+    lcolumn = bytes(block[(s - 1) % n] for s in order)
+    primary = order.index(0)
+    return lcolumn, primary
+
+
+def _ars_mtf_encode(data):
+    table = list(range(256))
+    ranks = []
+    for byte in data:
+        rank = table.index(byte)
+        ranks.append(rank)
+        if rank:
+            del table[rank]
+            table.insert(0, byte)
+    return ranks
+
+
+def _ars_events(ranks):
+    """MTF ranks as the selector stream the decoder eats: zero runs
+    through the zero counter (selectors 0/1, k selectors for a run of
+    Z = 2^k - 1 + B, B in k bits, LSB first), rank 1 as selector 2,
+    larger ranks through the model their size names, block end 10."""
+    events = []
+    i = 0
+    n = len(ranks)
+    while i < n:
+        if ranks[i] == 0:
+            j = i
+            while j < n and ranks[j] == 0:
+                j += 1
+            run = j - i
+            k = (run + 1).bit_length() - 1
+            bits = run - ((1 << k) - 1)
+            for bit in range(k):
+                events.append(("sel", (bits >> bit) & 1))
+            i = j
+            continue
+        rank = ranks[i]
+        if rank == 1:
+            events.append(("sel", 2))
+        else:
+            selector = 1 + rank.bit_length()
+            events.append(("sel", selector))
+            events.append(("mtf", selector - 3, rank))
+        i += 1
+    events.append(("sel", 10))
+    return events
+
+
+class _ArsEncoder:
+    """The quotient coder's encoder half: a window [xlo, xhi) over the
+    integer the stream's bits form, with the decoder's own arithmetic
+    around it.  The window is always non-empty — every step recentres
+    the code by renorm*low, so the chosen symbol's band always lies
+    inside the current one."""
+
+    def __init__(self):
+        self.range = ONE
+        self.xlo = 0
+        self.xhi = 1 << 26
+        self.c = 0
+        self.m = 26
+
+    def symbol(self, model, value):
+        index = value - model.first
+        total = model.total
+        renorm = self.range // total
+        cum = sum(model.freq[:index])
+        size = model.freq[index]
+        if index == model.nsyms - 1:
+            lo, hi = renorm * cum, self.range
+        else:
+            lo, hi = renorm * cum, renorm * (cum + size)
+        lo += self.c
+        hi += self.c
+        if lo > self.xlo:
+            self.xlo = lo
+        if hi < self.xhi:
+            self.xhi = hi
+        if self.xlo >= self.xhi:
+            raise AssertionError("arsenic encoder: empty window")
+        lowincr = renorm * cum
+        if cum + size == total:
+            range2 = self.range - lowincr
+        else:
+            range2 = renorm * size
+        shifts = 0
+        while range2 <= HALF:
+            range2 <<= 1
+            shifts += 1
+        self.xlo <<= shifts
+        self.xhi <<= shifts
+        self.c = (self.c + lowincr) << shifts
+        self.range = range2
+        self.m += shifts
+        model.bump(index)
+
+    def bits(self, model, value, count):
+        for i in range(count):
+            self.symbol(model, (value >> i) & 1)
+
+
+def arsenic_encode(payload, blockbits=9, randomized=False):
+    """A complete Arsenic (method 15) stream for ``payload``.
+
+    ``blockbits`` is the four-bit size code plus nine (9 = 512-byte
+    blocks, the smallest legal); ``randomized`` sets every block's
+    randomisation bit.  The RLE runs whole-file first, then blocks are
+    cut at token boundaries — never between a run's four equal bytes
+    and their count byte, which is where the references' per-block RLE
+    state would misread them.
+    """
+    if not payload:
+        raise ValueError("arsenic_encode: empty payload")
+    blocksize = 1 << blockbits
+    blocks = _ars_pack_blocks(_ars_rle_tokens(payload), blocksize)
+    if not blocks:
+        raise ValueError("arsenic_encode: nothing to encode")
+
+    enc = _ArsEncoder()
+    initial = Model(*MODELS[0])
+    selector = Model(*MODELS[1])
+    mtfmodels = [Model(*spec) for spec in MODELS[2:]]
+
+    enc.bits(initial, ord("A"), 8)
+    enc.bits(initial, ord("s"), 8)
+    enc.bits(initial, blockbits - 9, 4)
+    enc.symbol(initial, 0)              # first end-of-file bit: no
+    for index, block in enumerate(blocks):
+        data = bytearray(block)
+        if randomized:
+            _ars_randomize(data)
+        lcolumn, primary = _ars_forward_bwt(bytes(data))
+        enc.symbol(initial, 1 if randomized else 0)
+        enc.bits(initial, primary, blockbits)
+        for event in _ars_events(_ars_mtf_encode(lcolumn)):
+            if event[0] == "sel":
+                enc.symbol(selector, event[1])
+            else:
+                enc.symbol(mtfmodels[event[1]], event[2])
+        selector.reset()
+        for model in mtfmodels:
+            model.reset()
+        last = index == len(blocks) - 1
+        enc.symbol(initial, 1 if last else 0)
+        if last:
+            enc.bits(initial, zlib.crc32(payload) & 0xFFFFFFFF, 32)
+
+    bits = format(enc.xlo, "0%db" % enc.m)
+    out = bytearray()
+    for at in range(0, enc.m, 8):
+        out.append(int(bits[at:at + 8].ljust(8, "0"), 2))
     return bytes(out)

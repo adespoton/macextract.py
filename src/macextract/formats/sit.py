@@ -16,8 +16,8 @@ both.  Header, all big-endian:
 
    0  1   resource fork method; 1  1  data fork method.  Low four
          bits: compression (0 stored, 1 RLE-90, 2 LZW 14-bit, 3
-         serialized Huffman, 13 LZ + Huffman; 6/8/15 and friends are
-         not implemented).  0x40: an Optimizer module ran first, its
+         serialized Huffman, 13 LZ + Huffman, 15 Arsenic; 6/8 and
+         friends are not implemented).  0x40: an Optimizer module ran first, its
          id at 108 (resource) / 106 (data); id 255 has nothing to
          undo and the bytes stand as stored.  0x80 / 0x10: encrypted
          (``NewDE``), encryptor id at 109 / 107.  32 / 33: this
@@ -46,6 +46,7 @@ used yet.
 import struct
 
 from .._core import Archive, Entry
+from .._arsenic import arsenic_decode
 from .._crc16 import crc16_arc
 from .._huffman import decode as _huffman_decode
 from .._lzw import lzw_decompress
@@ -96,6 +97,8 @@ def _decode_fork(method, stored, length, name, label):
         return _huffman_decode(stored, length)[0]
     if method == 13:
         return sit13_decode(stored, length)
+    if method == 15:
+        return arsenic_decode(stored, length)
     raise UnsupportedError(
         "StuffIt: method %d compression is not supported" % method)
 
@@ -106,7 +109,9 @@ def _read_fork(data, offset, stored_len, method, length, want_crc,
         return b""
     decoded = _decode_fork(method, data[offset:offset + stored_len],
                            length, name, label)
-    if crc16_arc(decoded) != want_crc:
+    # Method 15 carries its own CRC-32, checked inside the decoder; the
+    # header's CRC-16 field means nothing for it (it is set to zero).
+    if method != 15 and crc16_arc(decoded) != want_crc:
         raise CorruptError(
             "StuffIt: %s fork CRC mismatch for %r" % (label, name))
     return decoded

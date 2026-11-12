@@ -32,19 +32,19 @@ begins.
 9. [x] StuffIt classic (`.sit`) — archive header, 112-byte entry
    headers, folder markers as path components, CRC-16/ARC on headers
    and decoded forks. Compression methods 0 (stored), 1 (RLE-90), 2
-   (LZW 14-bit), 3 (serialized Huffman) and 13 (LZ + canonical
+   (LZW 14-bit), 3 (serialized Huffman), 13 (LZ + canonical
    Huffman, all five predefined code selectors plus in-stream tables)
-   round-trip both forks. Refused with named errors: methods 5/6/7/8/
-   14/15 (not implemented), every cipher (PassLock included — none can
-   be used yet, so no password is asked for), and Optimizer modules
-   other than id 255 (nothing to undo).
+   and 15 (Arsenic, item 11) round-trip both forks. Refused with named
+   errors: methods 5/6/7/8/14 (not implemented), every cipher (PassLock
+   included — none can be used yet, so no password is asked for), and
+   Optimizer modules other than id 255 (nothing to undo).
 
 10. [x] StuffIt 5 (`.sit`) — the 80-byte banner probe, the entry walk
     with parent-offset folder paths (folders and the marker entry
     after each one are not files), the second block's Finder-info
     gate, comments, entry versions 1 and 3, UTF-8 names.  Methods 0,
-    1, 2, 3 and 13 through the classic codecs; methods 14 and 15
-    refused by name (Arsenic is next).  Encryption works: the password
+    1, 2, 3 and 13 through the classic codecs and 15 (Arsenic, item
+    11); method 14 refused by name.  Encryption works: the password
     is graded against the archive header's five-byte MD5-of-MD5 hash
     (PasswordRequiredError without one, BadPasswordError for the
     wrong), then each keyed fork is RC4 under MD5(password)[:5] plus
@@ -54,7 +54,23 @@ begins.
     header CRC is carried but not checked, same as the reference
     readers.
 
-Later batches (each with tests): StuffIt arsenic → Compact Pro →
+11. [x] Arsenic (StuffIt method 15) — the decoder written from
+    Matthew Russotto's spec and checked against the parent C project's
+    ``sit_arsenic.c`` and XADMaster's ``XADStuffItArsenicHandle``
+    line by line: the quotient arithmetic coder (integer division and
+    rounding exactly as specified) under the nine adaptive models,
+    the selector stream with its zero-run counting, move-to-front, the
+    counting-sort inverse BWT from the block header's primary index,
+    the randomisation table, the byte-stuffing RLE, and the stream's
+    own CRC-32 over the output.  Block size ``1 << (v + 9)`` from four
+    stream bits; both containers skip their CRC-16 for method 15 (the
+    field is zero) because the stream checks itself.  The fixture
+    encoder cuts the RLE whole-file and packs blocks at run-token
+    boundaries, never between a run's four equal bytes and their
+    count byte — the one split the references' per-block RLE state
+    would misread.  26 tests, generated data only.
+
+Later batches (each with tests): Compact Pro →
 DiskDoubler → Now Compress →
 MacCompress (.Z) → ARC → LZH/LHA → PackIt splits → DiskDoubler/StuffIt
 split volumes → MAR → Apple Backup → Tomes → zip/gzip/tar → StuffIt
