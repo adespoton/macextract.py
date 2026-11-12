@@ -133,3 +133,50 @@ def _sixbit_encode(src):
     if nbits:
         out.append(BINHEX_ALPHABET[(acc << (6 - nbits)) & 0x3F])
     return "".join(out)
+
+
+AS_EPOCH = __import__("datetime").datetime(2000, 1, 1, tzinfo=__import__("datetime").timezone.utc)
+
+
+def applesingle_seconds(dt):
+    delta = dt - AS_EPOCH
+    return int(delta.total_seconds())
+
+
+def applesingle(name=b"TestFile", data=b"hello world", rsrc=b"",
+                type=b"TEXT", creator=b"ttxt", flags=0, created=None, modified=None,
+                magic=0x00051600, version=0x00020000, macinfo=0x00,
+                include_dates=True, include_finder=True, include_name=True):
+    """Build an AppleSingle (or AppleDouble header, magic=0x00051607)."""
+    entries = []
+    if data is not None and magic == 0x00051600:
+        entries.append((1, data))
+    if rsrc:
+        entries.append((2, rsrc))
+    if include_name and name is not None:
+        entries.append((3, bytes(name)))
+    if include_dates:
+        created = created if created is not None else applesingle_seconds(
+            __import__("datetime").datetime(1993, 6, 1, tzinfo=__import__("datetime").timezone.utc))
+        modified = modified if modified is not None else applesingle_seconds(
+            __import__("datetime").datetime(1995, 11, 4, tzinfo=__import__("datetime").timezone.utc))
+        entries.append((8, struct.pack(">iiii", created, modified, 0, 0)))
+    if include_finder:
+        finder = type + creator + struct.pack(">H", flags) + b"\0" * 22
+        entries.append((9, finder))
+    entries.append((10, b"\0\0\0" + bytes([macinfo])))
+
+    header_size = 26 + 12 * len(entries)
+    offset = header_size
+    parts = []
+    descriptors = []
+    for entry_id, payload in entries:
+        descriptors.append((entry_id, offset, len(payload)))
+        offset += len(payload)
+    parts.append(struct.pack(">II", magic, version) + b"\0" * 16)
+    parts.append(struct.pack(">H", len(entries)))
+    for entry_id, off, length in descriptors:
+        parts.append(struct.pack(">III", entry_id, off, length))
+    for _, payload in entries:
+        parts.append(payload)
+    return b"".join(parts)

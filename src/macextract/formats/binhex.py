@@ -185,6 +185,6 @@ def probe(data):
     return 0
 
 
-def open_data(data, password=None):
+def open_data(data, password=None, filename=None):
     # BinHex has no encryption; a supplied password is simply unused.
     return _parse(data)

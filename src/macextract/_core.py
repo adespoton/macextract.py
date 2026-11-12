@@ -33,6 +33,7 @@ class Entry:
     creator: bytes = b"????"
     finder_flags: int = 0
     locked: bool = False
+    protected: bool = False
     created: int = 0
     modified: int = 0
     finder_info: bytes | None = None  # 32-byte Finder info, if carried
