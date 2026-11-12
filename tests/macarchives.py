@@ -1345,3 +1345,254 @@ def arsenic_encode(payload, blockbits=9, randomized=False):
     for at in range(0, enc.m, 8):
         out.append(int(bits[at:at + 8].ljust(8, "0"), 2))
     return bytes(out)
+
+
+# --- Compact Pro (.cpt) ---------------------------------------------
+
+class MsbBitWriter:
+    """Most-significant-bit-first bits, padded to whole bytes."""
+
+    def __init__(self):
+        self.out = bytearray()
+        self.acc = 0
+        self.n = 0
+
+    def bit(self, b):
+        self.acc = (self.acc << 1) | (b & 1)
+        self.n += 1
+        if self.n == 8:
+            self.out.append(self.acc)
+            self.acc = 0
+            self.n = 0
+
+    def bits(self, value, count):
+        for i in range(count - 1, -1, -1):
+            self.bit((value >> i) & 1)
+
+    def to_bytes(self):
+        out = bytearray(self.out)
+        if self.n:
+            out.append(self.acc << (8 - self.n))
+        return bytes(out)
+
+
+def rle8182_encode(payload):
+    """The Compact Pro run filter's encoder.
+
+    Runs of anything but 0x81 become one literal plus ``0x81 0x82 n``
+    escapes (n-1 further copies, n <= 255).  The escape byte itself
+    is the hard case: an 0x81 is only ever a literal when it is
+    flushed by the byte after it, so a run of 0x81s is emitted as
+    itself and the byte that follows decides — ``0x82`` gets the
+    ``0x81 0x82 0x00`` literal pair, anything else flushes the chain
+    as literals.  A file ending in 0x81 relies on the decoder's
+    ``remaining != 1`` arm.
+    """
+    out = bytearray()
+    i = 0
+    n = len(payload)
+    while i < n:
+        b = payload[i]
+        if b != 0x81:
+            j = i
+            while j < n and payload[j] == b:
+                j += 1
+            rest = j - i - 1
+            out.append(b)
+            while rest > 254:
+                out += b"\x81\x82\xff"
+                rest -= 254
+            if rest >= 2:
+                out += b"\x81\x82" + bytes([rest + 1])
+            elif rest == 1:
+                out.append(b)
+            i = j
+        else:
+            j = i
+            while j < n and payload[j] == 0x81:
+                j += 1
+            out += b"\x81" * (j - i)
+            i = j
+            if i < n and payload[i] == 0x82:
+                out += b"\x82\x00"     # the literal pair 0x81 0x82
+                i += 1
+    return bytes(out)
+
+
+_CPT_LIT_LIST = bytes([128]) + b"\x88" * 128   # 256 literals, length 8
+_CPT_LEN_LIST = bytes([32]) + b"\x66" * 32     # 64 lengths, length 6
+_CPT_OFF_LIST = bytes([64]) + b"\x77" * 64     # 128 offsets, length 7
+
+
+def cpt_lzh_encode(payload):
+    """An LZH fork of ``payload``: literals only, in blocks of
+    0x1fff0 cost units (65272 nine-bit symbols), with the flush rule
+    between them — align, then skip three bytes if an odd number was
+    consumed since the block's data began, else two."""
+    if not payload:
+        return b""
+    out = bytearray()
+    i = 0
+    while i < len(payload):
+        out += _CPT_LIT_LIST + _CPT_LEN_LIST + _CPT_OFF_LIST
+        writer = MsbBitWriter()
+        cost = 0
+        while cost < 0x1FFF0 and i < len(payload):
+            writer.bit(1)
+            writer.bits(payload[i], 8)
+            i += 1
+            cost += 2
+        data = writer.to_bytes()
+        out += data
+        if i < len(payload):
+            out += b"\0\0" + (b"\0" if len(data) & 1 else b"")
+    return bytes(out)
+
+
+def cpt_fork(payload, lzh=False):
+    """One fork's stored bytes.  The decoder runs LZH first and the
+    run filter over its output, so the encoder goes the other way:
+    RLE, then LZH over the RLE's stream."""
+    if not payload:
+        return b""
+    stored = rle8182_encode(payload)
+    if lzh:
+        return cpt_lzh_encode(stored)
+    return stored
+
+
+def _cpt_encrypt(password, preamble, streams):
+    """Encrypt an entry's stored forks in order, eight preamble bytes
+    first, on one cipher."""
+    from macextract.formats.cpt import _Cipher
+    cipher = _Cipher(password)
+    first = True
+    out = []
+    for stream in streams:
+        if first:
+            stream = preamble + stream
+            first = False
+        out.append(cipher.encrypt(stream))
+    return out
+
+
+def _cpt_count(nodes):
+    total = 0
+    for node in nodes:
+        if "folder" in node:
+            total += 1 + _cpt_count(node["children"])
+        else:
+            total += 1
+    return total
+
+
+def compactpro(files=(), comment=b"", xmagic=0, password=None):
+    """A Compact Pro archive.
+
+    ``files`` is a flat list: ``{"folder": "Dir"}`` opens a folder,
+    ``{"folder_end": True}`` closes it, anything else is a file with
+    ``name`` (str), ``data`` and/or ``rsrc`` bytes, optional ``lzh``
+    (or per-fork ``rsrc_lzh`` / ``data_lzh``), ``type``, ``creator``,
+    ``created``, ``modified``, ``finder_flags``, and ``encrypted``.
+    """
+    if len(comment) > 255:
+        raise ValueError("compactpro: comment longer than 255 bytes")
+
+    # The flat list becomes a tree so folder counts (every header
+    # below, nested included) are exact.
+    nodes = []
+    stack = [nodes]
+    for spec in files:
+        if "folder" in spec:
+            children = []
+            stack[-1].append({"folder": spec["folder"], "children": children})
+            stack.append(children)
+        elif spec.get("folder_end"):
+            if len(stack) == 1:
+                raise ValueError("compactpro: folder_end with no folder")
+            stack.pop()
+        else:
+            stack[-1].append(spec)
+    if len(stack) != 1:
+        raise ValueError("compactpro: unclosed folder")
+
+    records = []
+
+    def collect(some):
+        for node in some:
+            if "folder" in node:
+                records.append(("dir", node["folder"],
+                                _cpt_count(node["children"])))
+                collect(node["children"])
+            else:
+                records.append(("file", node, None))
+
+    collect(nodes)
+
+    # Forks are laid out first, so every record knows its offset.
+    bodies = []
+    fork_at = 8
+    entries = []
+    for kind, node, count in records:
+        if kind == "dir":
+            entries.append((kind, node.encode("mac_roman"), count, None))
+            continue
+        rsrc = node.get("rsrc", b"")
+        data = node.get("data", b"")
+        r_lzh = node.get("rsrc_lzh", node.get("lzh", False))
+        d_lzh = node.get("data_lzh", node.get("lzh", False))
+        r_stored = cpt_fork(rsrc, r_lzh)
+        d_stored = cpt_fork(data, d_lzh)
+        flags = (1 if node.get("encrypted") else 0) \
+            | (2 if r_lzh else 0) | (4 if d_lzh else 0)
+        if flags & 1:
+            if password is None:
+                raise ValueError("compactpro: encrypted entry, no password")
+            # The eight-byte preamble belongs to the first fork with
+            # bytes, counted in its compressed length.
+            streams = []
+            if r_stored:
+                streams.append(r_stored)
+                streams.append(d_stored)
+            elif d_stored:
+                streams.append(d_stored)
+            else:
+                streams = []
+            if streams:
+                r_enc, d_enc = (None, None)
+                enc = _cpt_encrypt(password, b"\0" * 8, streams)
+                if r_stored:
+                    r_enc, d_enc = enc
+                else:
+                    d_enc = enc[0]
+                r_stored, d_stored = r_enc or b"", d_enc or b""
+        filecrc = zlib.crc32(rsrc + data) ^ 0xFFFFFFFF
+        fileoffs = fork_at
+        fork_at += len(r_stored) + len(d_stored)
+        bodies.append(r_stored + d_stored)
+        meta = struct.pack(
+            ">BIIIIIHIHIIII", 1, fileoffs,
+            int.from_bytes(_four(node.get("type", b"????")), "big"),
+            int.from_bytes(_four(node.get("creator", b"????")), "big"),
+            node.get("created", 0), node.get("modified", 0),
+            node.get("finder_flags", 0), filecrc, flags,
+            len(rsrc), len(data), len(r_stored), len(d_stored))
+        entries.append(("file", node.get("name", "").encode("mac_roman"),
+                        meta, None))
+
+    region = struct.pack(">H", len(entries)) + bytes([len(comment)]) + comment
+    for kind, name, payload, _ in entries:
+        nl = len(name) | (0x80 if kind == "dir" else 0)
+        region += bytes([nl]) + name
+        region += struct.pack(">H", payload) if kind == "dir" else payload
+    index_off = 8 + sum(len(b) for b in bodies)
+    index = struct.pack(">I", zlib.crc32(region) ^ 0xFFFFFFFF) + region
+    header = bytes([1, 1]) + struct.pack(">H", xmagic) \
+        + struct.pack(">I", index_off)
+    return header + b"".join(bodies) + index
+
+
+def _four(code):
+    if isinstance(code, str):
+        code = code.encode("ascii")
+    return (code + b"????")[:4]

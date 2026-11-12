@@ -70,8 +70,30 @@ begins.
     count byte — the one split the references' per-block RLE state
     would misread.  26 tests, generated data only.
 
-Later batches (each with tests): Compact Pro →
-DiskDoubler → Now Compress →
+12. [x] Compact Pro (`.cpt`) — the 8-byte archive header with the
+    signature byte, the index CRC (reflected CRC-32, seeded
+    0xFFFFFFFF, compared without the final xor) gateing the whole
+    walk, folders rebuilt from the directory-count scheme (every
+    header decrements its whole stack of budgets), the comment, the
+    45-byte file records, and both forks stored resource-first with
+    one CRC-32 across the pair.  The ``0x81 0x82`` run filter and the
+    LZH layer (LZSS + three canonical Huffman codes, 8 KB window,
+    the count byte in front of each code list, no Reverse16, the
+    offset taken exactly with 0 legal, the block flush rule) both
+    round-trip through the container; the fixture encoder cuts the
+    RLE first and LZH after, the decoder's order backwards, since the
+    decoder runs LZH before the filter.  Encrypted entries decode
+    under ``password=`` with Compact Pro's CRC-table cipher (the
+    password becomes a nine-byte key folded into two 32-bit CRC
+    registers seeded 0x01234567/0x89ABCDEF); an encrypted stream
+    opens with eight decrypted, discarded bytes counted in the first
+    non-empty fork, and the cipher runs across both forks without
+    resetting.  Nothing verifies the password but the entry's CRC-32,
+    so a wrong one raises BadPasswordError only after a full decode.
+    Volume numbers other than 1 and segmented sets are refused by
+    name.  38 tests, generated data only.
+
+Later batches (each with tests): DiskDoubler → Now Compress →
 MacCompress (.Z) → ARC → LZH/LHA → PackIt splits → DiskDoubler/StuffIt
 split volumes → MAR → Apple Backup → Tomes → zip/gzip/tar → StuffIt
 SpaceSaver (with Aladdin tables, attribution per NOTICE). StuffIt X never. PC formats (RAR, 7z,

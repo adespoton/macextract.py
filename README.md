@@ -46,12 +46,12 @@ listed under *Supported* is not supported yet. See
 | AppleLink package | `.pkg` | SqueezePlay; stored and LZW-compressed forks, v0/v1 |
 | StuffIt classic | `.sit` | methods 0/1/2/3/13/15 (stored, RLE-90, LZW-14, Huffman, LZ+Huffman, Arsenic), folders, CRC-16 checks; other methods, encryption and optimizer modules refused by name |
 | StuffIt 5 | `.sit` (banner) | folders with parent-offset paths, UTF-8 names, Finder-info gate, comments, entry versions 1 and 3; methods 0/1/2/3/13/15 (Arsenic); encrypted archives via `password=` (MD5 grade, RC4 forks); method 14 refused by name |
+| Compact Pro | `.cpt` | folders rebuilt from the directory-count scheme, comments, RLE and LZH (LZSS + canonical Huffman) forks; encrypted archives via `password=` (its CRC-table cipher); segmented sets refused by name |
 
 ## Not supported (yet)
 
 StuffIt X, StuffIt classic's methods 5/6/7/8/14, StuffIt 5's
-method 14 (code-only, no spec), Compact Pro, DiskDoubler,
-MacCompress, Now
+method 14 (code-only, no spec), DiskDoubler, MacCompress, Now
 Compress, StuffIt SpaceSaver, Alysis SuperDisk!, Private File, ARC, LZH/LHA, MAR, Apple
 Backup, Tomes, zip/gzip/tar/.Z, RAR, 7-Zip, bzip2, xz, and PC formats.
 StuffIt X and every other PC/modern format are out of scope, same as
