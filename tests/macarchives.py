@@ -207,3 +207,66 @@ def uuencode(name="TestFile", data=b"hello world", mode=0o644,
         out.append("`")
         out.append("end")
     return ("\n".join(out) + "\n").encode("ascii")
+
+
+def btoa(name="file.txt", data=b"hello world", newver=True, bad_sum=False):
+    """Build a .btoa image in memory (v4 or v5)."""
+    lines_out = ["xbtoa5 78 %s Begin" % (name or "-") if newver else "xbtoa Begin"]
+    eor = 0; total = 0; rot = 0
+    def chk(ch):
+        nonlocal eor, total, rot
+        eor ^= ch
+        total = (total + ch + 1) & 0xFFFFFFFF
+        rot = (((rot << 1) | (rot >> 31)) & 0xFFFFFFFF) + ch
+    body = []
+    i = 0
+    groups = []
+    while i < len(data):
+        quad = data[i:i+4]
+        i += len(quad)
+        full = len(quad) == 4
+        groups.append((quad.ljust(4, b"\0"), full))
+    if not groups:
+        groups = []
+    chars = []
+    for padded, full in groups:
+        if full and padded == b"\0\0\0\0":
+            chars.append("z")
+            continue
+        if full and newver and padded == b" " * 4:
+            chars.append("y")
+            continue
+        code = int.from_bytes(padded, "big")
+        block = []
+        for _ in range(5):
+            block.append(code % 85 + 33)
+            code //= 85
+        chars.extend(chr(c) for c in reversed(block))
+    perline = 78 if newver else 78
+    line_chars = []
+    lines = []
+    for ch in chars:
+        line_chars.append(ch)
+        if len(line_chars) >= perline:
+            lines.append(line_chars); line_chars = []
+    if line_chars:
+        lines.append(line_chars)
+    for lc in lines:
+        text = "".join(lc)
+        for c in text:
+            chk(ord(c))
+        if newver:
+            lines_out.append(text + chr(33 + (total % 85)))
+        else:
+            lines_out.append(text)
+    if not newver:
+        # version 4 checksums the decoded quad bytes (padding included)
+        eor = 0; total = 0; rot = 0
+        for padded, _full in groups:
+            for b in padded:
+                chk(b)
+    want_hex = "%x" % len(data)
+    if bad_sum:
+        eor ^= 0xFF
+    lines_out.append("xbtoa End N %d %s E %x S %x R %x" % (len(data), want_hex, eor, total, rot))
+    return ("\n".join(lines_out) + "\n").encode("latin-1")
