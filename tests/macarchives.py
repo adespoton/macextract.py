@@ -3156,3 +3156,99 @@ def lha(entries, end_marker=True):
     if end_marker:
         out += b"\x00"
     return bytes(out)
+
+
+def _fold_fork_crcs(res_crc, data_crc, chunk, pos, rsrc_len):
+    """Fold a part's payload into the running resource/data fork sums."""
+    i = 0
+    p = pos
+    while i < len(chunk):
+        if p < rsrc_len:
+            n = min(len(chunk) - i, rsrc_len - p)
+            res_crc = crc16_arc(chunk[i:i + n], res_crc)
+        else:
+            n = len(chunk) - i
+            data_crc = crc16_arc(chunk[i:i + n], data_crc)
+        p += n
+        i += n
+    return res_crc, data_crc
+
+
+def sitseg_parts(name=b"TestFile", data=b"hello world", rsrc=b"",
+                 type=b"TEXT", creator=b"ttxt", flags=0,
+                 created=400000000, modified=400000100,
+                 set_id=b"\x41\xa7", chunks=None):
+    """Build a StuffIt segmented set. ``chunks`` is the payload size of
+    each part; defaults to two parts cut near the halfway point.
+    Returns the part images as a list of bytes, part 1 first.
+
+    Forks join resource-first: payload = rsrc + data.
+    """
+    payload = bytes(rsrc) + bytes(data)
+    if chunks is None:
+        half = (len(payload) + 1) // 2
+        chunks = [half, len(payload) - half]
+    parts = []
+    pos = 0
+    res_crc = 0
+    data_crc = 0
+    rsrc_len = len(rsrc)
+    fp = struct.pack(">4s4sHIIII", type, creator, flags, created, modified,
+                    len(rsrc), len(data))
+    assert len(fp) == 26
+    for index, size in enumerate(chunks, 1):
+        chunk = payload[pos:pos + size]
+        res_crc, data_crc = _fold_fork_crcs(res_crc, data_crc, chunk, pos,
+                                            rsrc_len)
+        pos += len(chunk)
+        head = bytearray(100)
+        head[0:2] = set_id
+        head[2] = 0
+        head[3] = index
+        head[4] = len(name)
+        head[5:5 + len(name)] = name
+        head[68:94] = fp
+        struct.pack_into(">H", head, 96, res_crc)
+        struct.pack_into(">H", head, 98, data_crc)
+        struct.pack_into(">H", head, 94, crc16_arc(bytes(head[:94])))
+        parts.append(bytes(head) + chunk)
+    return parts
+
+
+def splt_parts(name_unused=None, data=b"hello world", rsrc=b"",
+               type=b"TEXT", creator=b"ttxt", flags=0,
+               created=400000000, modified=400000100,
+               tick=12345, chunks=None):
+    """Build a DiskDoubler ``SPLT`` set. ``chunks`` is the payload size of
+    each part; defaults to two parts cut near the halfway point.
+    Returns the part images as a list of bytes, part 1 first.
+
+    Forks join data-first: payload = data + rsrc. There is no name.
+    """
+    payload = bytes(data) + bytes(rsrc)
+    if chunks is None:
+        half = (len(payload) + 1) // 2
+        chunks = [half, len(payload) - half]
+    nparts = len(chunks)
+    assert nparts <= 256
+    parts = []
+    pos = 0
+    for index in range(nparts):
+        size = chunks[index]
+        chunk = payload[pos:pos + size]
+        pos += len(chunk)
+        head = bytearray(94)
+        head[0:4] = b"SPLT"
+        struct.pack_into(">I", head, 4, tick)
+        struct.pack_into(">II", head, 8, len(data), len(rsrc))
+        head[16:20] = type
+        head[20:24] = creator
+        struct.pack_into(">H", head, 24, flags)
+        struct.pack_into(">II", head, 32, modified, created)
+        struct.pack_into(">H", head, 40, nparts)
+        struct.pack_into(">H", head, 42, index)
+        struct.pack_into(">I", head, 44, len(chunk))
+        struct.pack_into(">H", head, 48, crc16_ccitt(chunk))
+        head[90:94] = b"SPLT"
+        parts.append(bytes(head) + chunk)
+    return parts
