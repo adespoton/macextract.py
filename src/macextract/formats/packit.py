@@ -31,6 +31,37 @@ the forks (also not checked).
 
 PackIt files may circulate inside a MacBinary envelope; the library
 opens that layer first and this reader sees the bare stream.
+
+Installments / split sets
+-------------------------
+No PackIt installment (split across media) layout is documented anywhere
+this project may rely on:
+
+  * the format's published description — R. Scott McGinnis's UNPACKIT.DOC,
+    appendices B and C, carried by the C reference project's
+    docs/formats/packit.md — lists only ``PMag``, ``PMa4``, ``PMa5`` and
+    ``PEnd`` and describes no multi-volume or installment scheme;
+  * the C reader (src/fmt_packit.c) carries no split handling either;
+  * the C reference's segmented-schemes documentation (FORMATS.md,
+    "Segmented archives (multi-part sets)") lists six schemes — StuffIt
+    segments, Compact Pro segments, spanned zip, plain ``.NNN`` splits,
+    DiskDoubler's ``SPLT`` and RFC 2046 ``message/partial`` — and PackIt
+    is not one of them;
+  * macutils' ``doc/README.unpit`` (referenced as a PackIt source) and the
+    format's other public notes describe no installment mechanism.
+
+PackIt subfiles also carry no volume number, part index or part total —
+unlike Compact Pro's segment header — so a lone part cannot even be
+recognised as one, and a set cannot be reassembled from content alone.
+This library therefore does not join PackIt archives split across media,
+and there is nothing here to detect sibling installments with. Instead, a
+PackIt stream cut short is refused with ``CorruptError`` naming the split
+possibility (in addition to truncation), rather than guessed at. If a
+published installment layout or a specimen ever turns up, it belongs in
+this module — do not reconstruct one from guesswork.
+
+A plain ``.NNN`` split of a ``.pit`` file is a generic byte split, not a
+PackIt mechanism, and is out of this module's scope.
 """
 
 import struct
@@ -38,6 +69,9 @@ import struct
 from .._core import Archive, Entry
 from .._huffman import HuffmanDecoder
 from ..errors import CorruptError, UnsupportedError
+
+SPLIT_HINT = (" (if this file is one part of a split/installment set, "
+              "joining split sets is not supported)")
 
 TYPE_STORED = b"PMag"
 TYPE_HUFFMAN = b"PMa4"
@@ -50,7 +84,7 @@ TAIL_CRC_SIZE = 2
 
 def _parse_header(buf, offset=0):
     if len(buf) < offset + HEADER_SIZE:
-        raise CorruptError("PackIt: cut short in the header")
+        raise CorruptError("PackIt: cut short in the header" + SPLIT_HINT)
     name_len = buf[offset]
     if not 1 <= name_len <= 63:
         raise CorruptError("PackIt: name length %d out of range" % name_len)
@@ -106,7 +140,7 @@ def _parse(data):
             fork_start = offset + 4 + HEADER_SIZE
             fork_end = fork_start + data_len + rsrc_len + TAIL_CRC_SIZE
             if fork_end > len(data):
-                raise CorruptError("PackIt: subfile is truncated")
+                raise CorruptError("PackIt: subfile is truncated" + SPLIT_HINT)
             forks = data[fork_start:fork_start + data_len + rsrc_len]
             entries.append(_finish_entry(entry, forks[:data_len], forks[data_len:]))
             offset = fork_end
@@ -118,14 +152,15 @@ def _parse(data):
             body = stream[HEADER_SIZE:]
             need = data_len + rsrc_len + TAIL_CRC_SIZE
             if len(body) < need:
-                raise CorruptError("PackIt: coded subfile decoded short")
+                raise CorruptError("PackIt: coded subfile decoded short"
+                                   + SPLIT_HINT)
             forks = body[:data_len + rsrc_len]
             entries.append(_finish_entry(entry, forks[:data_len], forks[data_len:]))
             offset = used_end
             continue
         raise CorruptError("PackIt: unknown type word %r" % word)
     if not saw_end:
-        raise CorruptError("PackIt: missing PEnd")
+        raise CorruptError("PackIt: missing PEnd" + SPLIT_HINT)
     archive = Archive()
     archive.format = "PackIt"
     archive.entries = entries
@@ -138,10 +173,18 @@ def _decode_coded_subfile(data, coded_start):
     dlen/rlen fields size the rest, and the declarations below read what
     remains under the same tree."""
     decoder = HuffmanDecoder(data, coded_start)
-    header = decoder.decode(HEADER_SIZE)
+    try:
+        header = decoder.decode(HEADER_SIZE)
+    except CorruptError as error:
+        raise CorruptError("PackIt: coded subfile ran out of bits"
+                           + SPLIT_HINT) from error
     entry, data_len, rsrc_len = _parse_header(header, 0)
     remaining = data_len + rsrc_len + TAIL_CRC_SIZE
-    body = decoder.decode(remaining)
+    try:
+        body = decoder.decode(remaining)
+    except CorruptError as error:
+        raise CorruptError("PackIt: coded subfile ran out of bits"
+                           + SPLIT_HINT) from error
     return header + body, decoder.next_byte_offset
 
 

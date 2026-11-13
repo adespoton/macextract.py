@@ -136,3 +136,38 @@ def test_packit_header_crc_not_enforced():
     broken = image[:4 + 92] + b"\xbe\xef" + image[4 + 94:]
     archive = macextract.open(io.BytesIO(broken))
     assert archive.entries[0].name == "x"
+
+def test_packit_truncated_subfile_names_split_possibility():
+    # A set cut across media is refused, naming the possibility.
+    image = macarchives.packit(files=[(b"x", DATA, b"", b"TEXT", b"TTxt")])
+    with pytest.raises(CorruptError) as excinfo:
+        macextract.open(io.BytesIO(image[:-40]))
+    assert "split" in str(excinfo.value)
+    assert "installment" in str(excinfo.value)
+
+def test_packit_missing_pend_names_split_possibility():
+    image = macarchives.packit(files=[(b"x", b"y", b"", b"TEXT", b"TTxt")],
+                               tail_word=False)
+    with pytest.raises(CorruptError) as excinfo:
+        macextract.open(io.BytesIO(image))
+    assert "split" in str(excinfo.value)
+
+def test_packit_header_cut_short_names_split_possibility():
+    image = macarchives.packit(files=[(b"x", DATA, b"", b"TEXT", b"TTxt")])
+    with pytest.raises(CorruptError) as excinfo:
+        macextract.open(io.BytesIO(image[:4 + 10]))
+    assert "split" in str(excinfo.value)
+
+def test_packit_coded_stream_exhaustion_names_split_possibility():
+    image = macarchives.packit(files=[(b"x", DATA, b"", b"TEXT", b"TTxt")],
+                               kind="huffman", tail_word=False)
+    with pytest.raises(CorruptError) as excinfo:
+        macextract.open(io.BytesIO(image[:len(image) * 2 // 3]))
+    assert "split" in str(excinfo.value)
+
+def test_packit_split_refusal_chains_cause():
+    image = macarchives.packit(files=[(b"x", DATA, b"", b"TEXT", b"TTxt")],
+                               kind="huffman", tail_word=False)
+    with pytest.raises(CorruptError) as excinfo:
+        macextract.open(io.BytesIO(image[:len(image) * 2 // 3]))
+    assert excinfo.value.__cause__ is not None
