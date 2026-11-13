@@ -3466,3 +3466,260 @@ def abk_item(disk, off, *, stamp, start, part, path, folder=False,
     at += len(data_have)
     disk[at:at + len(rsrc_have)] = rsrc_have
     return at + len(rsrc_have)
+
+
+# --- Apple Installer Tome ---------------------------------------------
+
+TOME_IC1_LEN = [
+    (0x000, 2, 0, 0),    (0x001, 2, 0, 1),    (0x004, 3, 0, 2),
+    (0x00A, 4, 0, 3),    (0x00B, 4, 0, 4),    (0x018, 5, 0, 5),
+    (0x019, 5, 0, 6),    (0x034, 6, 0, 7),    (0x035, 6, 0, 8),
+    (0x036, 6, 0, 9),    (0x037, 6, 0, 10),   (0x00E, 4, 3, 11),
+    (0x01E, 5, 3, 19),   (0x03E, 6, 5, 27),   (0x07E, 7, 6, 59),
+    (0x0FE, 8, 7, 123),  (0x1FE, 9, 8, 251),  (0x3FE, 10, 9, 507),
+    (0x3FF, 10, 10, 1019),
+]
+TOME_TXT_LEN = [
+    (0x000, 3, 0, 0),    (0x001, 3, 0, 1),    (0x002, 3, 0, 2),
+    (0x003, 3, 0, 3),    (0x008, 4, 0, 4),    (0x009, 4, 0, 5),
+    (0x00A, 4, 0, 6),    (0x00B, 4, 0, 7),    (0x006, 3, 2, 8),
+    (0x00E, 4, 3, 12),   (0x01E, 5, 4, 20),   (0x03E, 6, 5, 36),
+    (0x07E, 7, 6, 68),   (0x0FE, 8, 7, 132),  (0x1FE, 9, 8, 260),
+    (0x3FE, 10, 9, 516), (0x3FF, 10, 10, 1028),
+]
+TOME_LIT = [
+    (0x00, 1, 0, 1),     (0x04, 3, 0, 2),     (0x05, 3, 0, 3),
+    (0x06, 3, 2, 4),     (0x0E, 4, 3, 8),     (0x1E, 5, 4, 16),
+    (0x1F, 5, 5, 32),
+]
+TOME_LIM_IC1 = (10, 20, 40, 80, 160, 672, 1000, 2688, 5376, 10752, 21504)
+TOME_LIM_TXT = (10, 20, 40, 80, 160, 320, 832, 1280, 2560, 5120, 10240)
+TOME_BLOCK = 65536
+
+
+def _tome_emit_code(writer, table, value):
+    for code, width, extra, base in table:
+        if base <= value < base + (1 << extra):
+            writer.bits(code, width)
+            if extra:
+                writer.bits(value - base, extra)
+            return
+    raise AssertionError("no code for value %d" % value)
+
+
+def tome_distance_bits(writer, pos, distance, codec):
+    limits = TOME_LIM_IC1 if codec == "ic1" else TOME_LIM_TXT
+    level = 0
+    while level < 11 and limits[level] < pos:
+        level += 1
+    if distance <= (1 << level):
+        writer.bit(0)
+        if level:
+            writer.bits(distance - 1, level)
+    elif distance <= 5 << level:
+        writer.bits(0b10, 2)
+        writer.bits(distance - (1 << level) - 1, level + 2)
+    else:
+        near = 5 << level
+        x = pos - near
+        if x < 2:
+            width = 1
+        else:
+            width = (x - 1).bit_length()
+        width = min(width, 15)
+        if codec == "ic1" and 1004 < x <= 1024:
+            width = 11
+        writer.bits(0b11, 2)
+        writer.bits(distance - near - 1, width)
+
+
+def _tome_tokens(writer, payload, pos, stop, codec):
+    length_table = TOME_IC1_LEN if codec == "ic1" else TOME_TXT_LEN
+    max_c = 2042 if codec == "ic1" else 2051
+    literal_bits = 8 if codec == "ic1" else 7
+    mode = 1
+    pending = []
+
+    def flush_literals():
+        nonlocal mode, pending
+        rest = pending
+        pending = []
+        while rest:
+            n = min(len(rest), 63)
+            _tome_emit_code(writer, length_table, 0)
+            _tome_emit_code(writer, TOME_LIT, n)
+            for byte in rest[:n]:
+                if literal_bits == 8:
+                    writer.bits(byte, 8)
+                else:
+                    if byte > 0x7F:
+                        raise ValueError(
+                            "text codec literals are 7 bits; byte 0x%02x "
+                            "cannot be encoded" % byte)
+                    writer.bits(byte, 7)
+            mode = 0 if n < 63 else 1
+            rest = rest[n:]
+
+    while pos < stop:
+        window_lo = max(0, pos - 43008)
+        remaining = len(payload) - pos
+        extra = 1 if mode == 0 else 0
+        min_length = 2 + extra
+        cap = min(max_c + min_length, remaining)
+        best_length = 0
+        best_distance = 0
+        probe = payload[pos:pos + min(3, remaining)]
+        found = payload.rfind(probe, window_lo, pos + len(probe) - 1)
+        if found != -1:
+            distance = pos - found
+            length = 0
+            while (pos + length < len(payload) and
+                   payload[found + length] == payload[pos + length] and
+                   length < cap):
+                length += 1
+            if length >= min_length:
+                best_length, best_distance = length, distance
+        else:
+            probe = payload[pos:pos + min(2, remaining)]
+            found = payload.rfind(probe, window_lo, pos + len(probe) - 1)
+            if found != -1:
+                distance = pos - found
+                length = 0
+                while (pos + length < len(payload) and
+                       payload[found + length] == payload[pos + length] and
+                       length < cap):
+                    length += 1
+                if length >= min_length:
+                    best_length, best_distance = length, distance
+        if best_length:
+            # A flush ending in a short literal run flips mode to 0;
+            # the copy must then be long enough for the +1 rule.
+            # Decide before flushing.
+            need_extra = 1 if pending and len(pending) % 63 != 0 else 0
+            if best_length >= 2 + need_extra:
+                flush_literals()
+                extra = need_extra
+                _tome_emit_code(writer, length_table,
+                                best_length - 2 - extra)
+                tome_distance_bits(writer, pos, best_distance, codec)
+                mode = 1
+                pos += best_length
+                continue
+            # No room for the +1 rule; hold a literal instead.
+            pending.append(payload[pos])
+            pos += 1
+            continue
+        else:
+            pending.append(payload[pos])
+            pos += 1
+    flush_literals()
+    return pos
+
+
+def tome_fork_stream(payload, codec=None, stated_length=None,
+                     block_codecs=None):
+    """Build a fork's block stream.
+
+    ``codec`` is None (stored), "ic1" (InstaCompOne) or "text".
+    ``block_codecs`` is a per-block list overriding ``codec``
+    ("stored"/"ic1"/"text").  ``stated_length`` overrides the fork's
+    declared length (defaults to ``len(payload)``); blocks are cut per
+    absolute 64 KiB of output.
+    """
+    if stated_length is None:
+        stated_length = len(payload)
+    codecs = block_codecs
+    out = bytearray()
+    block = 0
+    pos = 0
+    while pos < len(payload):
+        target = min((block + 1) * TOME_BLOCK, stated_length)
+        block_codec = None
+        if codecs is not None and block < len(codecs):
+            block_codec = codecs[block]
+        elif codec is not None:
+            block_codec = codec
+        if pos >= target:
+            # A previous copy overshot this block's whole range; the
+            # empty block still occupies a 4-byte header in the stream.
+            out += b"\x01\x00\x00\x00"
+            block += 1
+            continue
+        if block_codec in (None, "stored"):
+            out += b"\x01\x00\x00\x00"
+            out += payload[pos:target]
+            pos = target
+        else:
+            ic1 = block_codec == "ic1"
+            out += b"\x00" + (b"\x01" if ic1 else b"\x00") + b"\x00\x00"
+            writer = MsbBitWriter()
+            pos = _tome_tokens(writer, payload, pos,
+                               min(target, len(payload)), block_codec)
+            out += writer.to_bytes()
+        block += 1
+    return bytes(out)
+
+
+def tome(entries, header_long=True, tamper=None):
+    """Build an Apple Installer Tome in memory.
+
+    Each entry is a dict: ``name`` (str), ``type``, ``creator``
+    (4-byte bytes), ``created``, ``modified`` (Mac 1904 seconds),
+    ``finder_flags``, and for each fork ``data``/``rsrc`` (bytes or
+    None for an absent fork), ``data_codec``/``rsrc_codec``
+    ("stored"/"ic1"/"text"), ``data_stated``/``rsrc_stated`` (fork
+    length override), ``data_block_codecs``/``rsrc_block_codecs``.
+    """
+    table_end = 0x24 + len(entries) * 0x80
+    streams = []
+    records = []
+    for entry in entries:
+        data = entry.get("data")
+        rsrc = entry.get("rsrc")
+        forks = []
+        for fork in ("data", "rsrc"):
+            payload = entry.get(fork)
+            if payload is None:
+                forks.append((0, 0, 0))
+                continue
+            raw_stream = entry.get(fork + "_stream")
+            if raw_stream is not None:
+                stream = raw_stream
+            else:
+                stream = tome_fork_stream(
+                    payload,
+                    codec=entry.get(fork + "_codec"),
+                    stated_length=entry.get(fork + "_stated"),
+                    block_codecs=entry.get(fork + "_block_codecs"))
+            offset = table_end + sum(len(s) for s in streams)
+            stated = entry.get(fork + "_stated")
+            forks.append((len(payload) if stated is None else stated,
+                          offset, len(stream)))
+            streams.append(stream)
+        record = bytearray(0x80)
+        name = entry["name"]
+        if isinstance(name, str):
+            name = name.encode("mac_roman", "strict")
+        record[0x06] = len(name)
+        record[0x07:0x07 + len(name)] = name
+        record[0x26:0x2A] = entry.get("type", b"????")
+        record[0x2A:0x2E] = entry.get("creator", b"????")
+        struct.pack_into(">I", record, 0x2E, entry.get("created", 0))
+        struct.pack_into(">I", record, 0x32, entry.get("modified", 0))
+        struct.pack_into(">H", record, 0x36, entry.get("finder_flags", 0))
+        struct.pack_into(">IIII", record, 0x3C, *forks[0], 0)
+        struct.pack_into(">IIII", record, 0x4C, *forks[1], 0)
+        records.append(bytes(record))
+    header = bytearray(0x24)
+    header[:4] = b"\x6b\x63\x00\x01"
+    if header_long:
+        struct.pack_into(">I", header, 0x16, 0x24)
+    struct.pack_into(">H", header, 0x1A, len(entries))
+    out = bytearray(header)
+    for record in records:
+        out += record
+    for stream in streams:
+        out += stream
+    if tamper:
+        out = tamper(bytearray(out))
+    return bytes(out)
