@@ -151,7 +151,32 @@ begins.
     gzip and busybox all refuse them), 10-bit and up decode
     byte-exact through all three. 40 tests.
 
-Later batches (each with tests): ARC → LZH/LHA → PackIt splits →
+16. [x] ARC (.arc) — the System Enhancement Associates member
+    stream: a lone 0x1a per member, a method byte, a 13-byte
+    NUL-padded name, a little-endian u32 compressed size, MS-DOS date
+    and time words and a CRC-16/ARC over the DECODED bytes; every
+    method but 1 carries a u32 original size, and method 1's short
+    header makes its compressed size its original size. The archive
+    ends with a lone 0x1a 0x00 marker or EOF on a member boundary.
+    Members are flat files; names carrying separators or .. are
+    sanitised through the extract-path sanitiser, and DOS wall-clock
+    times are stored as Mac-epoch seconds treated as UTC. Methods
+    1, 2 (stored), 3 (RLE-90), 4 (squeezed: the node-pair Huffman
+    tree, LSB-first bit walk, symbols over an RLE-90 stream), 8
+    (crunched: the width byte, this library's LZW at 12 bits with
+    256 the clear and the output under RLE-90) and 9 (squashed: the
+    same LZW at 13 bits, no width byte, no RLE-90) round-trip. The
+    garble (ARC's ``g<password>``) XORs the upper-cased password over
+    each member's compressed bytes with the position resetting per
+    member, and nothing in the file says so — when a password is
+    given, each member is graded by its CRC-16 and a mismatch raises
+    BadPasswordError. Methods 5, 6 and 7 (crunched) and 0x0a / 0x0b
+    (PAK crushed / distilled) and 0x7f (Unix compress) are refused
+    by name, as are the ARC 7.x informational and subdirectory
+    items; an ArcMac file is refused by name too. 49 tests,
+    generated data only.
+
+Later batches (each with tests): LZH/LHA → PackIt splits →
 DiskDoubler/StuffIt split volumes → MAR → Apple Backup → Tomes →
 zip/gzip/tar → StuffIt SpaceSaver (with Aladdin tables, attribution
 per NOTICE). StuffIt X never. PC formats (RAR, 7z, bzip2, xz) never.

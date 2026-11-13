@@ -2620,3 +2620,129 @@ def compress_encode(payload, maxbits=16, blockmode=True, force_clear=False):
             value |= bit << j
         body.append(value)
     return bytes(out + body)
+
+
+def garble_xor(buf, password):
+    """ARC's garble: XOR the upper-cased password over a member's
+    compressed bytes, by position from the first byte again at every
+    member.  The password is upper-cased before it is used."""
+    pw = password.encode("latin-1") if isinstance(password, str) else bytes(password)
+    pw = bytes(b - 32 if 97 <= b <= 122 else b for b in pw)
+    if not pw:
+        return bytes(buf)
+    length = len(pw)
+    return bytes(b ^ pw[i % length] for i, b in enumerate(buf))
+
+
+def squeeze_encode(payload):
+    """Method 4's coder, test-side: build a Huffman-like tree from the
+    byte frequencies of the payload (plus symbol 256 as the stream's
+    terminator), emit it as a little-endian u16 pair count then that
+    many pairs of little-endian s16 — a negative value is a leaf
+    holding symbol ``-value - 1``; a non-negative value is the index
+    of another pair — then bit-pack the codes LSB-first, one bit per
+    step from the root, the bit picking the pair's child.  The root is
+    pair 0.  Not every formatting decision here matches a real ARC
+    squeeze encoder; this one only has to round-trip through the
+    decoder."""
+    import heapq
+    from collections import Counter
+
+    freq = Counter(payload)
+    freq[256] = freq.get(256, 0) + 1
+    dummy = 0
+    while len(freq) < 2:
+        if dummy not in freq:
+            freq[dummy] = 1
+        dummy += 1
+    heap = []
+    serial = 0
+    for symbol, count in freq.items():
+        heapq.heappush(heap, (count, serial, ("leaf", symbol)))
+        serial += 1
+    while len(heap) > 1:
+        first = heapq.heappop(heap)
+        second = heapq.heappop(heap)
+        heapq.heappush(heap, (first[0] + second[0], serial,
+                              ("node", first[2], second[2])))
+        serial += 1
+    root = heap[0][2]
+
+    pairs = []
+    codes = {}
+
+    def walk(node, code, depth):
+        if node[0] == "leaf":
+            codes[node[1]] = (code, depth)
+            return -(node[1] + 1)
+        index = len(pairs)
+        pairs.append(None)
+        left = walk(node[1], code, depth + 1)              # bit 0
+        right = walk(node[2], code | (1 << depth), depth + 1)   # bit 1
+        pairs[index] = (left, right)
+        return index
+
+    walk(root, 0, 0)
+    out = bytearray(struct.pack("<H", len(pairs)))
+    for left, right in pairs:
+        out += struct.pack("<hh", left, right)
+    writer = LsbBitWriter()
+    for symbol in list(payload) + [256]:
+        code, numbits = codes[symbol]
+        writer.put(code, numbits)
+    out += writer.flush()
+    return bytes(out)
+
+
+def arc(entries, garble=None, end_marker=True):
+    """Build an ARC archive in memory.
+
+    Each entry dict carries ``name``, ``data`` and a ``method``
+    (default 2, stored).  ``date`` and ``time`` are the MS-DOS date
+    and time words stored in the header (defaults: 2020-06-15
+    12:00:00).  Method 1 writes the short header with no original
+    size.  Members are laid end to end and the archive ends with a
+    lone ``1a 00`` unless ``end_marker=False``.  A member's CRC-16/ARC
+    covers the DECODED bytes.  ``garble=<password>`` XORs the
+    upper-cased password over each member's COMPRESSED bytes,
+    resetting the position to the password's first byte at every
+    member; the header is not garbled.
+    """
+    out = bytearray()
+    for spec in entries:
+        name = spec["name"]
+        raw = name.encode("mac_roman") if isinstance(name, str) else bytes(name)
+        if len(raw) > 13:
+            raise ValueError("ARC member name is longer than 13 bytes")
+        method = spec.get("method", 2)
+        data = bytes(spec["data"])
+        date = spec.get("date", 0x50CF)          # 2020-06-15
+        time = spec.get("time", 0x6000)          # 12:00:00
+        if method in (1, 2):
+            comp = data
+        elif method == 3:
+            comp = rle90_encode(data)
+        elif method == 4:
+            comp = squeeze_encode(rle90_encode(data))
+        elif method == 8:
+            comp = b"\x0c" + lzw_compress(rle90_encode(data),
+                                          maxbits=12, blockmode=True)
+        elif method == 9:
+            comp = lzw_compress(data, maxbits=13, blockmode=True)
+        else:
+            # The refused methods are never decoded; the payload is
+            # stored raw so a refusal can be graded on the header.
+            comp = data
+        if garble is not None:
+            comp = garble_xor(comp, garble)
+        crc = crc16_arc(data)
+        header = b"\x1a" + bytes([method]) + raw.ljust(13, b"\0")
+        if method == 1:
+            header += struct.pack("<IHHH", len(comp), date, time, crc)
+        else:
+            header += struct.pack("<IHHHI", len(comp), date, time, crc,
+                                  len(data))
+        out += header + comp
+    if end_marker:
+        out += b"\x1a\x00"
+    return bytes(out)
