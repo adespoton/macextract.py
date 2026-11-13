@@ -176,7 +176,31 @@ begins.
     items; an ArcMac file is refused by name too. 49 tests,
     generated data only.
 
-Later batches (each with tests): LZH/LHA → PackIt splits →
-DiskDoubler/StuffIt split volumes → MAR → Apple Backup → Tomes →
-zip/gzip/tar → StuffIt SpaceSaver (with Aladdin tables, attribution
-per NOTICE). StuffIt X never. PC formats (RAR, 7z, bzip2, xz) never.
+17. [x] LZH/LHA (.lzh, .lha) — the LHa member stream per Oki's
+    header.doc as published, cross-checked against the C project's
+    notes: levels 0/1/2/3; the method ID at offset 2 and the level byte
+    at offset 20; level 0/1 headers carry the name in the base header,
+    levels 2/3 take it from the extended header chain (0x01 filename
+    mandatory there); the stored-size (skip-size) length moves the data
+    start along the ext chain; CRC-16/ARC over decoded bytes (absent
+    only in a short LArc header); -lh0-/-lz4- stored and the new-format
+    LZSS with the three Huffman tables (-lh4-..-lh7-) round-trip;
+    paths sanitised through the extract sanitiser; DOS date/time and
+    the level 0/1+2 Unix-time overrides honoured. 118 tests, fixtures
+    generated only; cross-checked decode-exactly against lhasa 0.4.0
+    black-box, none of its code used.
+
+Later batches (each with tests): PackIt splits → DiskDoubler/StuffIt
+split volumes → MAR → Apple Backup → Tomes → zip/gzip/tar → RAR,
+7-Zip, bzip2 and xz (decompression only, the Python port taking the
+PC/general compressors the C project never had; the 7-zipped ADC
+Developer CD MDF pairs in Classetta's gitignored dt2/ folder are the
+manual sanity material for this batch — unwrapped there, never
+committed) → StuffIt SpaceSaver (with Aladdin tables, attribution
+per NOTICE). StuffIt X never.
+
+List without extracting (unscheduled) comes with Classetta task 23b
+(FILER_IMPLEMENTATION_PLAN.md): every module currently decodes member
+bodies at open(); 23b moves CRC checks and password grading to first
+read, has listing read only a format's directory or per-member
+headers, and covers the Python side and the Filer side together.
