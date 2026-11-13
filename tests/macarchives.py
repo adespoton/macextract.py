@@ -3396,3 +3396,73 @@ def mar(entries, bad_header_crc=False, bad_block_crc=False):
     for child in tree["children"].values():
         emit(child)
     return bytes(out)
+
+
+ABK_DISK = 0x1000
+
+
+def abk_disk(number, total, stamp, used=0, drive=b"HD"):
+    """An 0x1000-byte Apple Backup disk, items to be filled in with
+    ``abk_item`` and the used length sealed with ``abk_seal``."""
+    d = bytearray(ABK_DISK)
+    struct.pack_into(">H", d, 0, 0x0103)
+    d[2:6] = b"CMWL"
+    struct.pack_into(">H", d, 6, number)
+    struct.pack_into(">H", d, 8, total)
+    struct.pack_into(">I", d, 0x0A, stamp)
+    struct.pack_into(">I", d, 0x0E, stamp)
+    d[0x12] = len(drive)
+    d[0x13:0x13 + len(drive)] = drive
+    struct.pack_into(">I", d, 0x32, ABK_DISK)
+    struct.pack_into(">I", d, 0x36, used)
+    return d
+
+
+def abk_seal(disk, used):
+    struct.pack_into(">I", disk, 0x36, used)
+
+
+def abk_align(off):
+    return (off + 0x1FF) & ~0x1FF
+
+
+def abk_item(disk, off, *, stamp, start, part, path, folder=False,
+             data_len=0, rsrc_len=0, data_have=b"", rsrc_have=b"",
+             created=0xA0000001, modified=0xA0000002, locked=True,
+             valid=True, type=b"TEXT", creator=b"ttxt",
+             finder_flags=0x0024):
+    """Write one item into a disk bytearray; returns the offset after
+    its forks. ``data_len``/``rsrc_len`` are the whole fork lengths
+    repeated in every part; ``data_have``/``rsrc_have`` are this
+    disk's bytes for them."""
+    h = off
+    pl = path.encode("mac_roman")
+    leaf = path.rsplit(":", 1)[-1].encode("mac_roman")
+    struct.pack_into(">H", disk, h, 0x0103)
+    disk[h + 2:h + 6] = b"RLDW"
+    struct.pack_into(">H", disk, h + 6, start)
+    struct.pack_into(">I", disk, h + 8, stamp)
+    struct.pack_into(">I", disk, h + 0x0C, h)
+    disk[h + 0x10] = len(leaf)
+    disk[h + 0x11:h + 0x11 + len(leaf)] = leaf
+    struct.pack_into(">H", disk, h + 0x30, part)
+    disk[h + 0x32] = 0x80 if folder else 0x00
+    disk[h + 0x33] = 1 if valid else 0
+    if not folder:
+        disk[h + 0x34:h + 0x38] = type
+        disk[h + 0x38:h + 0x3C] = creator
+        struct.pack_into(">H", disk, h + 0x3C, finder_flags)
+        disk[h + 0x54] = 1 if locked else 0
+    struct.pack_into(">I", disk, h + 0x56, created)
+    struct.pack_into(">I", disk, h + 0x5A, modified)
+    struct.pack_into(">I", disk, h + 0x5E, data_len)
+    struct.pack_into(">I", disk, h + 0x62, rsrc_len)
+    struct.pack_into(">I", disk, h + 0x66, len(data_have))
+    struct.pack_into(">I", disk, h + 0x6A, len(rsrc_have))
+    struct.pack_into(">H", disk, h + 0x6E, len(pl))
+    disk[h + 0x70:h + 0x70 + len(pl)] = pl
+    at = h + 0x70 + len(pl)
+    disk[at:at + len(data_have)] = data_have
+    at += len(data_have)
+    disk[at:at + len(rsrc_have)] = rsrc_have
+    return at + len(rsrc_have)
