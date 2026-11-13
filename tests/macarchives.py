@@ -3252,3 +3252,147 @@ def splt_parts(name_unused=None, data=b"hello world", rsrc=b"",
         head[90:94] = b"SPLT"
         parts.append(bytes(head) + chunk)
     return parts
+
+
+MAR_MAGIC = 0x4D415280
+MAR_FILE = 0x66696C65           # 'file'
+MAR_FOLDER = 0x666F6C64         # 'fold'
+MAR_END = 0x2D2D2D2D            # '----'
+
+
+def _mar_crc32(buf, crc=0):
+    """The MAR CRC-32: MSB-first, polynomial 0x1EDC6F41, init 0, no xorout."""
+    for byte in buf:
+        crc ^= byte << 24
+        for _ in range(8):
+            if crc & 0x80000000:
+                crc = ((crc << 1) ^ 0x1EDC6F41) & 0xFFFFFFFF
+            else:
+                crc = (crc << 1) & 0xFFFFFFFF
+    return crc
+
+
+def _mar_record(rec_id, name_pstr, data_size, rsrc_size, comment_size,
+                file_flags, created, modified, finfo16, scroll4, bad_crc):
+    hdr = bytearray(128)
+    struct.pack_into(">I", hdr, 0, MAR_MAGIC)
+    struct.pack_into(">I", hdr, 4, rec_id)
+    assert len(name_pstr) <= 63
+    hdr[8] = len(name_pstr)
+    hdr[9:9 + len(name_pstr)] = name_pstr
+    struct.pack_into(">IIII", hdr, 72, data_size, rsrc_size, comment_size,
+                     file_flags)
+    struct.pack_into(">II", hdr, 88, created, modified)
+    hdr[96:112] = finfo16
+    hdr[112:116] = scroll4
+    crc = _mar_crc32(bytes(hdr[:124]))
+    if bad_crc:
+        crc ^= 0xFFFFFFFF
+    struct.pack_into(">I", hdr, 124, crc)
+    return bytes(hdr)
+
+
+def _mar_block(payload, bad_crc):
+    if len(payload) == 0:
+        return b""
+    crc = _mar_crc32(payload)
+    if bad_crc:
+        crc ^= 0xFFFFFFFF
+    pad = (128 - ((len(payload) + 4) & 127)) & 127
+    return payload + struct.pack(">I", crc) + b"\0" * pad
+
+
+def _mar_pstr(name_bytes):
+    assert len(name_bytes) <= 63
+    return bytes(name_bytes)
+
+
+def mar(entries, bad_header_crc=False, bad_block_crc=False):
+    """Build a stored (uncompressed) MAR archive in memory.
+
+    Each item dict carries ``name`` — a path with ``/`` separators;
+    folders along the path are created implicitly.  Files carry
+    ``data`` and/or ``rsrc`` bytes.  Extra keys: ``type``, ``creator``
+    (four bytes), ``flags`` (finder flags, u16), ``file_flags`` (u32,
+    bit 0 locked, bit 1 protected), ``created``, ``modified`` (Mac
+    1904-epoch seconds), ``comment`` (bytes), ``finfo`` (16 raw
+    Finder bytes, overriding the type/creator/flags build),
+    ``folder`` (True: a folder record, possibly empty), ``dinfo`` (a
+    folder's 16 DInfo bytes), ``scroll`` (a folder's 4 frScroll
+    bytes), ``raw_name`` (bytes: the leaf name used verbatim, for a
+    leaf whose name contains ``/``).
+    """
+    tree = {"children": {}, "spec": None}
+
+    def node_for(parts):
+        node = tree
+        for part in parts:
+            key = part if isinstance(part, bytes) else part.encode("mac_roman")
+            node = node["children"].setdefault(
+                key, {"children": {}, "spec": None, "key": key})
+        return node
+
+    for spec in entries:
+        if spec.get("raw_name") is not None:
+            parts = [spec["raw_name"]]
+        else:
+            parts = spec["name"].split("/")
+        node = node_for(parts)
+        node["spec"] = spec
+
+    out = bytearray()
+
+    def emit(node):
+        spec = node["spec"] or {}
+        is_folder = bool(spec.get("folder")) or bool(node["children"])
+        if is_folder:
+            created = spec.get("created", 0)
+            modified = spec.get("modified", 0)
+            file_flags = spec.get("file_flags", 0x00000010)  # MF_FILE_ISDIR
+            dinfo = spec.get("dinfo", b"\0" * 16)
+            scroll = spec.get("scroll", b"\0" * 4)
+            data = bytes(spec.get("data", b""))
+            rsrc = bytes(spec.get("rsrc", b""))
+            comment = bytes(spec.get("comment", b""))
+            out.extend(_mar_record(MAR_FOLDER, _mar_pstr(node["key"]),
+                               len(data), len(rsrc), len(comment),
+                               file_flags, created, modified, dinfo,
+                               scroll, bad_header_crc))
+            out.extend(_mar_block(data, bad_block_crc))
+            out.extend(_mar_block(rsrc, bad_block_crc))
+            out.extend(_mar_block(comment, bad_block_crc))
+            for child in node["children"].values():
+                emit(child)
+            out.extend(_mar_record(MAR_END, b"", 0, 0, 0, 0, 0, 0,
+                               b"\0" * 16, b"\0" * 4, bad_header_crc))
+            return
+
+        name_bytes = node["key"]
+        data = bytes(spec.get("data", b""))
+        rsrc = bytes(spec.get("rsrc", b""))
+        comment = bytes(spec.get("comment", b""))
+        type_code = spec.get("type", b"TEXT")
+        creator = spec.get("creator", b"ttxt")
+        flags = spec.get("flags", 0)
+        file_flags = spec.get("file_flags", 0)
+        created = spec.get("created", 400000000)
+        modified = spec.get("modified", 400000100)
+        finfo = spec.get("finfo")
+        if finfo is None:
+            finfo = struct.pack(">4s4sH", type_code, creator, flags) \
+                + b"\0" * 4 + b"\0\0"
+        out.extend(_mar_record(MAR_FILE, _mar_pstr(name_bytes),
+                           len(data), len(rsrc), len(comment),
+                           file_flags, created, modified, finfo,
+                           b"\0" * 4, bad_header_crc))
+        out.extend(_mar_block(data, bad_block_crc))
+        out.extend(_mar_block(rsrc, bad_block_crc))
+        out.extend(_mar_block(comment, bad_block_crc))
+
+    if len(tree["children"]) > 1:
+        raise ValueError(
+            "a MAR archive holds exactly one item (a file or a folder); "
+            "group several items under a folder")
+    for child in tree["children"].values():
+        emit(child)
+    return bytes(out)
