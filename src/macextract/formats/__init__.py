@@ -8,8 +8,8 @@
 
 from . import (
     applesingle, binhex, b64, btoa, cpt, dd, macbinary, mime, now, packit,
-    sit, sit5, sqp, uuencode, z, arc,
+    sit, sit5, sqp, uuencode, z, arc, lha,
 )
 
 FORMATS = [macbinary, binhex, applesingle, uuencode, btoa, b64, mime, packit,
-           sit, sit5, sqp, cpt, dd, now, z, arc]
+           sit, sit5, sqp, cpt, dd, now, z, arc, lha]

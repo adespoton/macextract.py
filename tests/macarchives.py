@@ -2746,3 +2746,413 @@ def arc(entries, garble=None, end_marker=True):
     if end_marker:
         out += b"\x1a\x00"
     return bytes(out)
+
+
+# ------------------------------------------------------------------ #
+# LZH/LHA (.lzh, .lha)                                                #
+# ------------------------------------------------------------------ #
+
+_LH_WBITS = {b"-lh4-": 12, b"-lh5-": 13, b"-lh6-": 15, b"-lh7-": 16}
+
+
+def _lzh_off_sym(dist):
+    """The offset table's symbol for a distance: the bit width of the
+    distance, whose top bit the decoder then implies."""
+    if dist == 1:
+        return 0
+    if dist == 2:
+        return 1
+    return (dist - 1).bit_length()
+
+
+def _lzh_tokens(payload, wsize):
+    """LZSS tokens — ``("l", byte)`` and ``("m", dist, length)`` —
+    from a hash chain over the payload.  A match never reaches beyond
+    the window or 256 bytes, and never back past the start."""
+    n = len(payload)
+    head = {}
+    prev = [-1] * n
+    tokens = []
+    i = 0
+    while i < n:
+        best_len = 0
+        best_dist = 0
+        if i + 3 <= n:
+            limit = min(256, n - i)
+            h = (payload[i] << 16) | (payload[i + 1] << 8) | payload[i + 2]
+            j = head.get(h, -1)
+            for _ in range(64):
+                if j < 0 or i - j > wsize:
+                    break
+                length = 0
+                while (length < limit
+                       and payload[j + length] == payload[i + length]):
+                    length += 1
+                if length > best_len:
+                    best_len = length
+                    best_dist = i - j
+                    if best_len >= limit:
+                        break
+                j = prev[j]
+        if best_len >= 3:
+            tokens.append(("m", best_dist, best_len))
+            span = best_len
+        else:
+            tokens.append(("l", payload[i]))
+            span = 1
+        for k in range(i, i + span):
+            if k + 3 <= n:
+                h = ((payload[k] << 16) | (payload[k + 1] << 8)
+                     | payload[k + 2])
+                prev[k] = head.get(h, -1)
+                head[h] = k
+        i += span
+    return tokens
+
+
+def _lzh_huffman(freq, cap):
+    """Huffman lengths for ``freq`` (symbol -> count); raises when a
+    code would pass ``cap`` bits."""
+    heap = [(weight, index, ("leaf", symbol))
+            for index, (symbol, weight) in enumerate(sorted(freq.items()))]
+    heapq.heapify(heap)
+    counter = len(heap)
+    while len(heap) > 1:
+        weight_a, _, node_a = heapq.heappop(heap)
+        weight_b, _, node_b = heapq.heappop(heap)
+        heapq.heappush(heap, (weight_a + weight_b, counter,
+                              ("node", node_a, node_b)))
+        counter += 1
+    lengths = {}
+
+    def walk(node, depth):
+        if depth > cap:
+            raise ValueError("LZH: code deeper than %d bits" % cap)
+        if node[0] == "leaf":
+            lengths[node[1]] = max(depth, 1)
+            return
+        walk(node[1], depth + 1)
+        walk(node[2], depth + 1)
+
+    walk(heap[0][2], 0)
+    return lengths
+
+
+def _lzh_command_lengths(freq):
+    """Command-table lengths: Huffman, deepest code capped at 28 (the
+    temporary table's alphabet is 31 wide, so ``length + 2`` must fit
+    inside it), falling back to flat codes when the payload's own
+    frequencies run deeper."""
+    if len(freq) == 1:
+        return {next(iter(freq)): 1}
+    try:
+        return _lzh_huffman(freq, 28)
+    except ValueError:
+        symbols = sorted(freq)
+        flat = max(1, (len(symbols) - 1).bit_length())
+        return {symbol: flat for symbol in symbols}
+
+
+def _lzh_put_length(writer, value):
+    """One table length: three bits, and a 7 says a unary tail
+    extends it (that many ones, then a zero)."""
+    if value < 7:
+        writer.bits(value, 3)
+        return
+    writer.bits(7, 3)
+    for _ in range(value - 7):
+        writer.bit(1)
+    writer.bit(0)
+
+
+def _lzh_block(writer, cmds, offbits):
+    """One block into the stream's shared bit writer: a 16-bit
+    command count, the temporary table, the command table coded
+    through it, the offset table, then the commands themselves — all
+    most-significant-bit first.  Blocks are NOT byte-aligned; only
+    the stream's end is padded."""
+    freq = Counter()
+    offs = set()
+    for token in cmds:
+        if token[0] == "l":
+            freq[token[1]] += 1
+        else:
+            freq[256 + token[2] - 3] += 1
+            offs.add(_lzh_off_sym(token[1]))
+
+    lengths = _lzh_command_lengths(freq)
+    n_code = max(lengths) + 1
+    code_lengths = [lengths.get(symbol, 0) for symbol in range(n_code)]
+    codes = _canon_codes_from_lengths(code_lengths)
+
+    # The temporary table codes the command table's own lengths: 0
+    # skips one unused code, anything else is the length plus two.
+    temp_syms = {0} | {value + 2 for value in lengths.values()}
+    n_temp = max(temp_syms) + 1
+    temp_width = max(1, (len(temp_syms) - 1).bit_length())
+    temp_lengths = [temp_width if symbol in temp_syms else 0
+                    for symbol in range(n_temp)]
+    temp_codes = _canon_codes_from_lengths(temp_lengths)
+
+    writer.bits(len(cmds), 16)
+
+    writer.bits(n_temp, 5)
+    for index, value in enumerate(temp_lengths):
+        _lzh_put_length(writer, value)
+        if index == 2 and n_temp > 2:
+            writer.bits(0, 2)        # the skip field after the 3rd
+
+    writer.bits(n_code, 9)
+    for value in code_lengths:
+        symbol = 0 if value == 0 else value + 2
+        code, width = temp_codes[symbol]
+        writer.bits(code, width)
+
+    if offs:
+        n_off = max(offs) + 1
+        off_width = max(1, (len(offs) - 1).bit_length())
+        off_lengths = [off_width if symbol in offs else 0
+                       for symbol in range(n_off)]
+        off_codes = _canon_codes_from_lengths(off_lengths)
+        writer.bits(n_off, offbits)
+        for value in off_lengths:
+            _lzh_put_length(writer, value)
+    else:
+        off_codes = None
+        writer.bits(0, offbits)      # one symbol, no bits at all
+        writer.bits(0, offbits)
+
+    for token in cmds:
+        if token[0] == "l":
+            symbol = token[1]
+        else:
+            symbol = 256 + token[2] - 3
+        code, width = codes[symbol]
+        writer.bits(code, width)
+        if token[0] == "m":
+            dist = token[1]
+            bits = _lzh_off_sym(dist)
+            code, width = off_codes[bits]
+            writer.bits(code, width)
+            if bits >= 2:
+                writer.bits(dist - (1 << (bits - 1)) - 1, bits - 1)
+
+
+def _lzh_encode(payload, wbits, empty_block=False):
+    """-lh4- .. -lh7-: the token stream cut into blocks of at most
+    4096 commands, each with its own three tables, all in one bit
+    stream that is padded to a byte only at its end."""
+    tokens = _lzh_tokens(payload, 1 << wbits)
+    if not tokens:
+        return b""
+    offbits = 4 if wbits < 15 else 5
+    writer = MsbBitWriter()
+    if empty_block:
+        # An empty block: a zero count, then three tables each saying
+        # "one symbol, no bits at all".
+        writer.bits(0, 16)
+        writer.bits(0, 5)
+        writer.bits(0, 5)
+        writer.bits(0, 9)
+        writer.bits(0, 9)
+        writer.bits(0, offbits)
+        writer.bits(0, offbits)
+    for start in range(0, len(tokens), 4096):
+        _lzh_block(writer, tokens[start:start + 4096], offbits)
+    return writer.to_bytes()
+
+
+def lha(entries, end_marker=True):
+    """Build an LZH/LHA archive in memory.
+
+    Each entry dict carries ``name`` and ``data``; ``method`` defaults
+    to ``-lh5-`` and ``level`` to 1.  Levels 0 and 1 store an MS-DOS
+    date/time word pair (``date``/``time``, defaults 2020-06-15
+    12:00:00) and the name field; levels 2 and 3 store a Unix time
+    (``unix_time``) and take the name from the extended headers.
+    Extra keys: ``os`` (the OS byte, levels 1-3, default ``'U'``),
+    ``attr`` (default 0x20), ``unix_area`` (level 0's ``U`` area),
+    ``filename_ext``/``path_ext`` (0x01/0x02 extended headers),
+    ``mode`` (0x50), ``mtime54`` (0x54), ``comment`` (0x3f),
+    ``exts`` (a list of raw ``(type, payload)`` pairs), ``short``
+    (level 0's CRC-less LArc header), ``bad_crc``/``bad_csum``,
+    ``empty_block`` (an empty block in front of the real one),
+    ``level3_word`` (the word-size field), ``os9`` (OS-9/68k's
+    two-short level 2 size) and ``dir`` (an ``-lhd-`` marker).
+    Refused methods are written with their payload stored raw: only
+    the header is graded.  The archive ends with a lone zero byte
+    unless ``end_marker=False``.
+    """
+    out = bytearray()
+    for spec in entries:
+        name = spec["name"]
+        raw = name.encode("mac_roman") if isinstance(name, str) \
+            else bytes(name)
+        data = bytes(spec["data"])
+        level = spec.get("level", 1)
+        method = spec.get("method", "-lh5-")
+        if isinstance(method, str):
+            method = method.encode("ascii")
+        if spec.get("dir"):
+            method = b"-lhd-"
+        if method in _LH_WBITS:
+            comp = _lzh_encode(data, _LH_WBITS[method],
+                               spec.get("empty_block", False))
+        elif method in (b"-lh0-", b"-lz4-", b"-lhd-"):
+            comp = data
+        else:
+            comp = data            # refused: only the header is graded
+
+        attr = spec.get("attr", 0x20)
+        crc = crc16_arc(data)
+        if spec.get("bad_crc"):
+            crc ^= 0xFFFF
+        unix_time = spec.get("unix_time", 1592222400)   # 2020-06-15
+        dos_date = spec.get("date", 0x50CF)
+        dos_time = spec.get("time", 0x6000)
+        mode = spec.get("mode", 0o644)
+        os_id = spec.get("os", 0x55)                    # 'U'
+
+        # The extended headers, one (type, payload) pair each.  The
+        # mode key is level 0's U-area there and a 0x50 header above.
+        exts = []
+        for key, kind in (("filename_ext", 0x01), ("path_ext", 0x02),
+                          ("comment", 0x3f), ("mode", 0x50),
+                          ("mtime54", 0x54)):
+            if key == "mode" and level == 0:
+                continue
+            if key in spec and spec[key] is not None:
+                value = spec[key]
+                if isinstance(value, str):
+                    value = value.encode("mac_roman")
+                elif isinstance(value, int):
+                    width = 2 if kind in (0x50,) else 4
+                    value = struct.pack("<I" if width == 4 else "<H",
+                                        value)
+                exts.append((kind, bytes(value)))
+        exts.extend((kind, bytes(value))
+                    for kind, value in spec.get("exts", ()))
+
+        if level in (0, 1) or level > 3:
+            if level == 1 and spec.get("short"):
+                raise ValueError("LHA: only level 0 has a short header")
+            n = len(raw)
+            if level == 0:
+                if spec.get("unix_area"):
+                    hdrsize = 36 + n
+                elif spec.get("short"):
+                    hdrsize = 22 + n
+                else:
+                    hdrsize = 24 + n
+            else:
+                hdrsize = 27 + n      # base, then the first size word
+            if hdrsize - 2 > 0xFF:
+                raise ValueError("LHA: level 0/1 name is too long")
+            if exts and level == 0:
+                raise ValueError("LHA: only level 1 has ext headers")
+
+            header = bytearray(hdrsize if level == 0 else 25 + n)
+            header[2:7] = method
+            if level == 1:
+                skip = sum(3 + len(payload) for _, payload in exts)
+                struct.pack_into("<I", header, 7, skip + len(comp))
+            else:
+                struct.pack_into("<I", header, 7, len(comp))
+            struct.pack_into("<I", header, 11, len(data))
+            struct.pack_into("<HH", header, 15, dos_time, dos_date)
+            header[19] = attr
+            header[20] = level
+            header[21] = n
+            header[22:22 + n] = raw
+            if level == 0:
+                if not spec.get("short"):
+                    struct.pack_into("<H", header, 22 + n, crc)
+                if spec.get("unix_area"):
+                    header[24 + n] = ord("U")
+                    header[25 + n] = 0            # minor version
+                    struct.pack_into("<I", header, 26 + n, unix_time)
+                    struct.pack_into("<H", header, 30 + n, mode)
+                    struct.pack_into("<HH", header, 32 + n, 100, 0)
+                header[0] = hdrsize - 2
+                header[1] = sum(header[2:]) & 0xFF
+            else:
+                struct.pack_into("<H", header, 22 + n, crc)
+                header[24 + n] = os_id
+                for kind, payload in exts:
+                    header += (struct.pack("<H", 3 + len(payload))
+                               + bytes([kind]) + payload)
+                header += b"\x00\x00"            # the terminator
+                header[0] = 25 + n
+                # The sum covers the base and the first size word —
+                # everything the header size byte counts.
+                header[1] = sum(header[2:27 + n]) & 0xFF
+            if spec.get("bad_csum"):
+                if level not in (0, 1):
+                    raise ValueError("LHA: only levels 0 and 1 have"
+                                     " a sum")
+                header[1] ^= 0xFF
+
+        elif level == 2:
+            if spec.get("short") or spec.get("unix_area"):
+                raise ValueError("LHA: short headers and the U area"
+                                 " are level 0 only")
+            chain = bytearray()
+            for kind, payload in exts:
+                chain += (struct.pack("<H", 3 + len(payload))
+                          + bytes([kind]) + payload)
+            chain += b"\x00\x00"
+            total = 24 + len(chain)
+            if total & 0xFF == 0:                # the low byte must
+                chain += b"\x00"                 # not be zero
+                total += 1
+            header = bytearray(24)
+            struct.pack_into("<H", header, 0, total)
+            header[2:7] = method
+            struct.pack_into("<I", header, 7, len(comp))
+            struct.pack_into("<I", header, 11, len(data))
+            struct.pack_into("<I", header, 15, unix_time)
+            header[19] = attr
+            header[20] = 2
+            struct.pack_into("<H", header, 21, crc)
+            header[23] = ord("K") if spec.get("os9") else os_id
+            if spec.get("os9"):
+                # LHA for OS-9/68k writes the length of the REST of
+                # the header: two bytes short.
+                struct.pack_into("<H", header, 0, total - 2)
+            header += chain
+            if spec.get("bad_csum"):
+                raise ValueError("LHA: levels 2 and 3 have no sum")
+
+        elif level == 3:
+            if spec.get("short") or spec.get("unix_area"):
+                raise ValueError("LHA: short headers and the U area"
+                                 " are level 0 only")
+            chain = bytearray()
+            for kind, payload in exts:
+                chain += (struct.pack("<I", 5 + len(payload))
+                          + bytes([kind]) + payload)
+            chain += b"\x00\x00\x00\x00"
+            total = 28 + len(chain)
+            header = bytearray(28)
+            struct.pack_into("<H", header, 0, spec.get("level3_word", 4))
+            header[2:7] = method
+            struct.pack_into("<I", header, 7, len(comp))
+            struct.pack_into("<I", header, 11, len(data))
+            struct.pack_into("<I", header, 15, unix_time)
+            header[19] = attr
+            header[20] = 3
+            struct.pack_into("<H", header, 21, crc)
+            header[23] = os_id
+            struct.pack_into("<I", header, 24, total)
+            header += chain
+            if spec.get("bad_csum"):
+                raise ValueError("LHA: levels 2 and 3 have no sum")
+
+        else:
+            raise ValueError("LHA: header level %d is not written"
+                             % level)
+
+        out += header + comp
+    if end_marker:
+        out += b"\x00"
+    return bytes(out)
