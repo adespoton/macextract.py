@@ -9,8 +9,9 @@
 from . import (
     abk, applesingle, binhex, b64, btoa, cpt, dd, macbinary, mar, mime, now,
     packit, segments, sit, sit5, sqp, uuencode, z, arc, lha, tome,
+    gzip, zip, tar,
 )
 
 FORMATS = [macbinary, binhex, applesingle, uuencode, btoa, b64, mime, packit,
            sit, sit5, sqp, cpt, dd, now, z, arc, lha, segments, mar, abk,
-           tome]
+           tome, gzip, zip, tar]
